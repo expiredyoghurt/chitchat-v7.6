@@ -1,0 +1,84 @@
+name = "just-a-chit-chat"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+
+# --- D1 database ---
+# Holds everything except sessions: topics, submissions, pupils, pupil
+# history, teacher-admin accounts, and settings (teacher password / rubric /
+# groq model). Create with:
+#   wrangler d1 create chitchat-v7
+# then paste the returned database_id below, and apply the schema with:
+#   wrangler d1 execute chitchat-v7 --remote --file=schema.sql
+# (drop --remote to also/instead set up a local dev database)
+[[d1_databases]]
+binding = "CCv6_DB"
+database_name = "chitchat-v7"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+
+# --- KV namespace ---
+# Sessions only now (see schema.sql / index.js header comment for why - KV's
+# expirationTtl gives free automatic session expiry that D1 doesn't have
+# built in). Create with:  wrangler kv:namespace create CCv6_DATA
+# Then paste the returned id below.
+kv_namespaces = [
+  { binding = "CCv6_DATA", id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID" }
+]
+
+# --- Teacher password ---
+# Lives in D1 (config table, key "teacher_password"), not hardcoded in this
+# file or the source. Set/replace it once with:
+#   wrangler d1 execute chitchat-v7 --remote --command="INSERT INTO config (key,value) VALUES ('teacher_password','yourSecretPassword') ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+# It can also be changed later from inside the Teacher Tools > Settings tab
+# (which is how it gets salted+hashed - the raw command above stores it as
+# plaintext temporarily, but the app hashes it on first successful login and
+# overwrites the plaintext, same as it always has).
+
+# --- AI marking: 2x Gemini -> 2x Groq -> 2x OpenRouter -> Workers AI ->
+# offline scorer as last resort ---
+# Tier 1: Google Gemini (vision-capable - the only one of the four AI
+# providers that can actually see the topic picture). Up to two keys can be
+# set (a 2nd account/key is tried right after the first if it fails or is
+# rate-limited) - both are Worker SECRETS, never paste them into this file
+# or any source file:
+#   wrangler secret put GEMINI_API_KEY
+#   wrangler secret put GEMINI_API_KEY_2
+# (paste keys from aistudio.google.com/apikey when prompted -
+# GEMINI_API_KEY_2 is optional, skip it if you only have one account/key)
+#
+# Tier 2: Groq (fast, generous free tier, text-only). Same two-key pattern,
+# also Worker SECRETS:
+#   wrangler secret put GROQ_API_KEY
+#   wrangler secret put GROQ_API_KEY_2
+# (paste keys from console.groq.com when prompted - GROQ_API_KEY_2 is
+# optional)
+#
+# Tier 3: OpenRouter. Same two-key pattern again:
+#   wrangler secret put OPENROUTER_API_KEY
+#   wrangler secret put OPENROUTER_API_KEY_2
+# (paste keys from openrouter.ai/keys when prompted - OPENROUTER_API_KEY_2 is
+# optional)
+#
+# OpenRouter is only ever allowed to call FREE models here - the app rejects
+# (at save time in Settings) and re-validates (at call time in aiScore) any
+# model ID that isn't "openrouter/free" (OpenRouter's own free-model
+# auto-router, and the default) or doesn't end in ":free". See the README
+# "Free models only (OpenRouter)" section for details.
+#
+# Tier 4 (final AI tier): Cloudflare Workers AI. Free, built in, no signup,
+# text-only - this binding is all it needs.
+#
+# Every question is marked with the same fixed chain, in this order: both
+# Gemini keys, then both Groq keys, then both OpenRouter keys, then Workers
+# AI. Any tier with no key/binding configured is simply skipped. Questions
+# are marked one at a time, not concurrently, specifically to avoid
+# bursting simultaneous requests at the same provider/key (a common trigger
+# for rate-limiting). If a question's entire chain fails on the first pass,
+# it's retried in full (with a pause in between) before falling back to an
+# offline rule-based scorer, so the app never hard-fails and AI marking has
+# a real chance to succeed even through transient rate-limit errors. Groq,
+# OpenRouter, and Workers AI can't see the picture, so whichever of them
+# actually runs for a given question instead uses that topic's optional
+# "Picture Description" field (Teacher Tools -> Topics) to judge the
+# Evidence part - see the README.
+[ai]
+binding = "AI"
