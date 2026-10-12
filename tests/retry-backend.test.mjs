@@ -98,6 +98,7 @@ function makeEnv(db) {
             feedback: "Good effort.",
             suggestion: "Add more detail.",
             modelAnswer: new Array(90).fill("word").join(" ") + ".",
+    modelAnswers: [new Array(90).fill("word").join(" ") + ".", new Array(90).fill("word").join(" ") + "."],
           }),
         };
       },

@@ -235,7 +235,8 @@ const u2base = () => ({
       { label: "Clarity & Sequence", points: 2, max: 2 }, { label: "Reflection / Lesson Learnt", points: 1, max: 2 }, { label: "Depth & Development Across Both Answers", points: 2, max: 2 } ] },
     { part: "Suggestion", points: 2, max: 2 }, { part: "Grammar Accuracy", points: 3, max: 3 }, { part: "Vocabulary Range & Appropriateness", points: 2, max: 3 }, { part: "Fluency & Delivery", points: 1, max: 1 },
   ],
-  feedback: "Lovely story.", suggestion: "Add where.", modelAnswer: new Array(150).fill("story").join(" ") + ".",
+  feedback: "Lovely story.", suggestion: "Add where.", modelAnswers: [new Array(120).fill("story").join(" ") + ".", new Array(120).fill("story").join(" ") + "."],
+  observed: [{ part: "Thought", status: "Present" }, { part: "Reason", status: "Present" }, { part: "Evidence", status: "Not observed" }],
 });
 function fetchWith(opts) {
   opts = opts || {};
@@ -302,7 +303,7 @@ async function submitFor(env, token, topicId, tag, opts) {
   const stored = storedRounds(env, res.data.record.id);
   check("they are stored on the rounds", stored[0].strengths && stored[1].nextStep);
   const mine = await get(env, "/api/submissions/mine", "pup1");
-  check("pupil history keeps strengths/nextStep (only scores are redacted)", mine.data.submissions[0].rounds.every((x) => x.strengths && x.nextStep && !("score" in x)));
+  check("pupil history keeps strengths/nextStep alongside the owner's own scores", mine.data.submissions[0].rounds.every((x) => x.strengths && x.nextStep && typeof x.score === "number"));
 }
 {
   __resetAiHealthForTests();
@@ -362,7 +363,7 @@ async function submitFor(env, token, topicId, tag, opts) {
 
   const lb = await get(env, "/api/submissions/leaderboard?limit=100", "pup1");
   check("peers' leaderboard entries visible: all counted, non-practice entries from both pupils", lb.data.total === 4 && lb.data.submissions.some((s) => s.pupilName === "Mei") && !lb.data.submissions.some((s) => s.practice));
-  check("peers' entries carry feedback/answers but no scores per unit", lb.data.submissions.every((s) => s.rounds.every((r) => r.feedback && !("score" in r) && !("coachUsed" in r))));
+  check("peers' entries carry feedback/answers but NO marks, while the pupil's own entries in the same list keep theirs", lb.data.submissions.filter((s) => s.pupilName !== "Jovan").length > 0 && lb.data.submissions.filter((s) => s.pupilName !== "Jovan").every((s) => s.rounds.every((r) => r.feedback && !("score" in r) && !("breakdown" in r) && !("observed" in r) && !("coachUsed" in r))) && lb.data.submissions.filter((s) => s.pupilName === "Jovan").every((s) => s.rounds.every((r) => typeof r.score === "number" && !("coachUsed" in r))));
   const q1 = await get(env, "/api/submissions/leaderboard?q=mei", "pup1");
   check("leaderboard search by pupil name", q1.data.total === 2 && q1.data.submissions.every((s) => s.pupilName === "Mei"));
   const q2 = await get(env, "/api/submissions/leaderboard?q=5IG", "pup1");
@@ -392,7 +393,7 @@ async function submitFor(env, token, topicId, tag, opts) {
   check("it returns strengths / next step / feedback too", t.data.feedback && "strengths" in t.data && "nextStep" in t.data && t.data.offline === false);
   check("nothing is saved: no submission, no pupils, no config, no history", env.CCv6_DB._state.submissions.length === before && env.CCv6_DB._state.pupils.length === 0 && env.CCv6_DB._state.history.length === 0 && !env.CCv6_DB._state.config.has("rubric_q2q3") && !env.CCv6_DB._state.config.has("rubric"));
   const t1 = await postJson(env, "/api/teacher/rubric-test", "admin", { unit: "q1", rubric: "Q1 CUSTOM RUBRIC", topicId: "topic_1", answers: ["a q1 answer GAMMA"] });
-  check("Question 1 test uses the Q1 prompt (Thought/Reason/Evidence) with its own rubric", t1.status === 200 && /Q1 CUSTOM RUBRIC/.test(f.calls[1].system) && /"part": "Thought"/.test(f.calls[1].system) && /GAMMA/.test(f.calls[1].user) && t1.data.breakdown.length === 8);
+  check("Question 1 test uses the Q1 prompt (Thought/Reason/Evidence) with its own rubric", t1.status === 200 && /Q1 CUSTOM RUBRIC/.test(f.calls[1].system) && /"part": "Thought", "points"/.test(f.calls[1].system) && /GAMMA/.test(f.calls[1].user) && t1.data.breakdown.length === 8);
   const blank = await postJson(env, "/api/teacher/rubric-test", "admin", { unit: "q2q3", rubric: "x", answers: ["", "  "] });
   check("empty sample answers are rejected", blank.status === 400);
   const forbidden = await postJson(env, "/api/teacher/rubric-test", "scoped-in", { unit: "q1", answers: ["x"] });

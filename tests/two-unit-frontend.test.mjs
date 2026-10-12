@@ -41,7 +41,7 @@ w.render(); await tick();
 let html = doc.getElementById('app').innerHTML;
 check("result: overall score shown", html.includes("17.5 / 25"));
 check("result: labelled as the average of 2 parts", html.includes("average of your 2 parts"));
-check("result: Q1 and 'Questions 2 & 3 (marked together)' cards are shown", html.includes("Question 1") && html.includes("Questions 2 &amp; 3 (marked together)"));
+check("result: Q1 and 'Questions 2 & 3 (assessed together)' cards are shown", html.includes("Question 1") && html.includes("Questions 2 &amp; 3 (assessed together)"));
 check("result: both Q2 and Q3 prompts displayed in the combined card", html.includes("Q2 theme?") && html.includes("Q3 follow-up?"));
 check("result: written feedback/suggestion/stronger version shown for both units", ["FB-UNIT-ONE", "FB-UNIT-TWO", "SUG-ONE", "SUG-TWO", "STRONGER-ONE", "STRONGER-TWO"].every((t) => html.includes(t)));
 check("result: no per-unit '/ 25' pills (only the overall one)", (html.match(/\/ 25/g) || []).length === 1, (html.match(/\/ 25/g) || []).length);
@@ -84,12 +84,12 @@ w.state.teacherSubs = [teacherSub]; w.state.subsTotal = 1; w.state.viewingSubmis
 w.render(); await tick();
 html = doc.getElementById('app').innerHTML;
 const ttext = doc.getElementById("app").textContent;
-check("teacher: sees Unit 1 and Unit 2 titles with per-unit scores", ttext.includes("Unit 1 \u2014 Question 1 (picture) \u2014 20/25") && ttext.includes("Unit 2 \u2014 Questions 2 & 3 (marked together) \u2014 15/25"));
+check("teacher: sees Unit 1 and Unit 2 titles with per-unit scores", ttext.includes("Unit 1 \u2014 Question 1 (picture) \u2014 20/25") && ttext.includes("Unit 2 \u2014 Questions 2 & 3 (assessed together) \u2014 15/25"));
 check("teacher: sees the Unit 2 breakdown incl. the new Depth sub-criterion", html.includes("Depth &amp; Development Across Both Answers") && html.includes("11 / 16"));
 check("teacher: sees both Q2 and Q3 answers under Unit 2", html.includes("Answer to Question 2") && html.includes("Answer to Question 3") && html.includes("x2") && html.includes("x3"));
 check("teacher: coach-used tag says which of Q2/Q3", html.includes("Coach used (Q3)"));
 check("teacher: has an override form button for each unit (independent controls)", doc.querySelectorAll('[data-action="start-override"]').length === 2);
-check("teacher: two-unit explanation banner present, states pupils see only overall", html.includes("Marked as <strong>2 units</strong>") && html.includes("Pupils only see the overall score"));
+check("teacher: two-unit explanation banner present, states pupils see their own marks only", html.includes("Assessed as <strong>2 units</strong>") && html.includes("Pupils see their own marks and breakdown"));
 check("teacher: final-score line says average of the 2 parts", html.includes("average of the 2 parts"));
 
 // ---- teacher settings: second rubric box ----
@@ -104,7 +104,7 @@ w.state.teacherTab = "submissions"; w.state.teacherSubs = [legacy]; w.state.view
 html = doc.getElementById('app').innerHTML;
 const ltext = doc.getElementById("app").textContent;
 check("legacy: renders 3 'Question N' cards with their own scores", ["Question 1 \u2014 10/25", "Question 2 \u2014 11/25", "Question 3 \u2014 12/25"].every((t) => ltext.includes(t)));
-check("legacy: says average of the 3 questions, no 2-unit banner", html.includes("average of the 3 questions") && !html.includes("Marked as <strong>2 units</strong>"));
+check("legacy: says average of the 3 questions, no 2-unit banner", html.includes("average of the 3 questions") && !html.includes("Assessed as <strong>2 units</strong>"));
 
 const passed = results.filter(Boolean).length;
 console.log("\n" + passed + "/" + results.length + " checks passed");

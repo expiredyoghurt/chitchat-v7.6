@@ -5,6 +5,67 @@ built as a single Cloudflare Worker: one file serves the pupil-facing game,
 the leaderboard, and hidden teacher tools, backed by D1 (Cloudflare's SQLite
 database) with Workers KV used only for session tokens.
 
+## What's new in v7.7 — pupils see their marks; improved answers beside their own
+
+No schema change and no migration: deploy the new `index.js` + `frontend.js`.
+
+**Pupil results view**
+
+- **Marks are back for the pupil themself (reverses the v7.5 "overall score only" rule).**
+  Each part shows *Your marks*: the unit score (e.g. 20 / 25) and every criterion
+  with points / max and the AI's note. Experience's six sub-criteria sit under a
+  collapsed *See detail* toggle. Older 3-question entries show each question's
+  breakdown the same way. **Only the owner gets this**: a classmate's entry on
+  *On the Leaderboard* carries answers, feedback and improved answers but no
+  score, max, breakdown or Present/Not-observed list (stripped on the server, not
+  just hidden), and the pupil's own entries inside that same list keep theirs.
+  Still teacher-only: who adjusted a score, when, and the original score
+  (the pupil sees only a bare "Score adjusted" tag), and which questions used the
+  coach. The Try Again before/after panel stays overall-only.
+- **Questions 2 & 3 are labelled as one unit** on the results, My Submissions,
+  Try Again, answer-writing and teacher screens: "Questions 2 & 3 (assessed
+  together)", both question prompts, and the line *Questions 2 and 3 are
+  assessed together, holistically, as one story.*
+- **"Your response | Improved response" table.** Question 1 = one row;
+  Questions 2 and 3 = one row each, headed by its own question. The pupil's
+  response is shown as plain paragraphs (in branch mode the filled boxes are
+  combined into one paragraph; blank optional boxes are skipped). On a phone the
+  two columns stack, response above improved. It replaces the old single
+  "stronger version" box.
+- **Improved answers.** For Questions 2 & 3 the AI now writes **one rewrite per
+  pupil answer** (`modelAnswers[0]` for Q2, `[1]` for Q3), kept continuous as one
+  story, each at least as long as the pupil's own answer (60-word floor) with a
+  **doubled cap**: 2800 characters / 400 words each, 5600 / 800 combined (was
+  2800 / 400 for the single combined rewrite). Question 1's rewrite now covers
+  the **whole** answer (all boxes) so it matches the paragraph beside it; its cap
+  is unchanged. One bounded regenerate happens when a rewrite is short or missing;
+  anything still short is withheld rather than shown.
+- **If the AI fails:** that cell says *AI suggested answer is currently not
+  available* (pupils are told their teacher can ask the AI to try again).
+  Teachers get a **Retry AI suggested answer** button on that round (Teacher
+  Tools -> Submissions -> the submission): it regenerates only the improved
+  answers (`POST /api/teacher/submissions/:id/retry-model-answer {roundIndex}`),
+  fills only the gaps, never touches scores, feedback, `markedBy` or the
+  leaderboard, and works on offline-marked rounds too. Class-scoped teachers can
+  use it only on their own classes.
+- **Present / Not observed.** The Questions 2 & 3 marker reports whether
+  **Thought**, **Reason** and **Evidence** (an example) appear anywhere in the two
+  answers: exactly "Present" or "Not observed", shown to the pupil and teacher as
+  "for information only". They carry **no marks**, are not in the breakdown, and
+  never change a score. If the AI omits one, or the part was marked offline, a
+  simple cue-word check fills it in so it is never blank. Question 1 has no such list.
+
+**Reliability fix included:** every AI provider call now sets an explicit output
+limit (6000 tokens; Gemini +2048 for its thinking tokens). Without one, Workers AI
+defaults to 256 tokens, which cut longer replies off mid-JSON and pushed
+submissions down the chain to the offline marker; two full rewrites make that far
+more likely. The reply check also now accepts improved-answer-only replies (for
+the retry button) while still rejecting any marking reply without a breakdown.
+
+**Data:** new rounds store `modelAnswers` (two strings) and `observed` on the
+Questions 2 & 3 round; `modelAnswer` still holds the two joined (older entries
+with only a combined improved story still display, as one full-width row).
+
 ## What's new in v7.6 — nudges, coach tips, strengths/next step, insights
 
 **v7.6.1 — Thought / Reason / Evidence are optional on Questions 2 and 3.** In
@@ -238,6 +299,8 @@ node tests/two-unit-marking.test.mjs     # v7.5: 2 marking units, combined Q2+Q3
 node tests/two-unit-frontend.test.mjs    # v7.5: jsdom - pupil sees overall score only, teacher sees breakdown, second rubric box
 node tests/v76-backend.test.mjs          # v7.6: coach tips, strengths/next step, history filters, rubric test, insights
 node tests/v76-frontend.test.mjs         # v7.6: jsdom - nudges, coach tips, history filters, teacher summary, rubric tools, insights
+node tests/v77-backend.test.mjs          # v7.7: owner-only breakdown, per-answer rewrites + doubled cap, Present/Not observed, retry button, token limits
+node tests/v77-frontend.test.mjs         # v7.7: jsdom - marks card, Your response | Improved response table, Q2&3 labelling, teacher retry
 ```
 
 `teacher-override.test.mjs` drives the real

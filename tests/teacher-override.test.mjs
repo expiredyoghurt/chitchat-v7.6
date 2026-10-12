@@ -188,6 +188,7 @@ const goodJson = () =>
     ],
     feedback: "Nicely done.", suggestion: "Add more detail.",
     modelAnswer: new Array(90).fill("word").join(" ") + ".",
+    modelAnswers: [new Array(90).fill("word").join(" ") + ".", new Array(90).fill("word").join(" ") + "."],
   });
 function fakeFetchGroqSucceeds() {
   return async (url) => {
@@ -213,7 +214,7 @@ let env1, id1;
   check("setup: submission is fully AI-marked and on the leaderboard already", res.data.record.gradingDegraded === false && res.data.record.leaderboardCounted === true);
   const storedRounds = (id) => JSON.parse(env1.CCv6_DB._state.submissions.find((x) => x.id === id).rounds);
   const originalScore0 = storedRounds(id1)[0].score;
-  check("v7.5: the pupil's own submit response carries no per-unit score", res.data.record.rounds.every((r) => !("score" in r)));
+  check("v7.7: the pupil's own submit response carries their per-unit score (and no teacher-only fields)", res.data.record.rounds.every((r) => typeof r.score === "number" && !("originalScore" in r) && !("overriddenBy" in r)));
 
   const ov = await override(env1, id1, 0, 5, "Actually this deserved less credit.", "admin");
   check("override succeeds", ov.status === 200 && ov.data.ok === true, JSON.stringify(ov.data).slice(0, 200));

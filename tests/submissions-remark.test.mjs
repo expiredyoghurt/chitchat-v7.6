@@ -215,6 +215,7 @@ const goodJson = () =>
     ],
     feedback: "Nicely done.", suggestion: "Add more detail.",
     modelAnswer: new Array(90).fill("word").join(" ") + ".",
+    modelAnswers: [new Array(90).fill("word").join(" ") + ".", new Array(90).fill("word").join(" ") + "."],
   });
 function fakeFetchGroqSucceeds() {
   return async (url) => {
@@ -262,7 +263,7 @@ let sharedEnv, subId;
   check("NOT added to leaderboard yet - only one of two units fixed", r0.data.addedToLeaderboard === false);
 
   check("v7.5: a submission has exactly 2 marking units", r0.data.submission.rounds.length === 2);
-  check("v7.5: pupil never receives per-unit scores from the re-mark response", r0.data.submission.rounds.every((x) => !("score" in x) && !("breakdown" in x) && !("max" in x)));
+  check("v7.7: the pupil's own re-mark response carries score/breakdown but never teacher-only fields", r0.data.submission.rounds.every((x) => typeof x.score === "number" && Array.isArray(x.breakdown) && !("originalScore" in x) && !("overriddenBy" in x) && !("coachUsed" in x)));
 
   const r2 = await remark(sharedEnv, subId, 1, "pup1");
   check("remarking the LAST fallback unit (Q2+Q3) succeeds", r2.data.success === true);

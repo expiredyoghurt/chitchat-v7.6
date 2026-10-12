@@ -217,7 +217,8 @@ const unit2Json = (over) =>
       { part: "Grammar Accuracy", points: 3, max: 3 }, { part: "Vocabulary Range & Appropriateness", points: 2, max: 3 }, { part: "Fluency & Delivery", points: 1, max: 1 },
     ],
     feedback: "Lovely connected story.", suggestion: "Add where it happened.",
-    modelAnswer: new Array(150).fill("story").join(" ") + ".",
+    modelAnswers: [new Array(120).fill("story").join(" ") + ".", new Array(120).fill("story").join(" ") + "."],
+    observed: [{ part: "Thought", status: "Present" }, { part: "Reason", status: "Present" }, { part: "Evidence", status: "Not observed" }],
     ...(over || {}),
   });
 // Expected Unit 2 total from the JSON above: Experience subs 2+4+2+2+1+2 = 13, + Suggestion 2 + 3 + 2 + 1 = 21
@@ -270,7 +271,7 @@ let env1, id1;
   check("Unit 2 call contains both questions", /Q2\?/.test(calls[1].user) && /Q3\?/.test(calls[1].user) && !/Q1\?/.test(calls[1].user));
   check("Unit 2 prompt reads the answers as one story", /ONE extended personal-narrative|one story/i.test(calls[1].system));
   check("Unit 2 prompt states Experience 16 / Suggestion 2 / Language 7", /Experience 16/.test(calls[1].system) && /Suggestion 2/.test(calls[1].system) && /Language Use 7/.test(calls[1].system));
-  check("Unit 2 prompt does not ask the model to return Thought/Reason/Evidence", !/"part": "Thought"|"part": "Reason"|"part": "Evidence"/.test(calls[1].system));
+  check("Unit 2 prompt does not ask the model to MARK Thought/Reason/Evidence (only Present / Not observed)", !/"part": "Thought", "points"|"part": "Reason", "points"|"part": "Evidence", "points"/.test(calls[1].system) && /Present or Not observed/.test(calls[1].system));
   check("Unit 2 prompt says Suggestion may appear in either answer", /EITHER answer/.test(calls[1].system));
   check("Unit 1 prompt is the unchanged TREES prompt (asks for Thought/Reason/Evidence)", /"part": "Thought"/.test(calls[0].system) && /"part": "Evidence"/.test(calls[0].system));
   check("Unit 1 prompt carries the Unit 1 rubric (Experience 12), not the Unit 2 one", /Experience: 0-12 marks/.test(calls[0].system) && !/QUESTIONS 2 AND 3 TOGETHER/.test(calls[0].system));
@@ -296,7 +297,7 @@ let env1, id1;
   const expected = row.repeated_ideas_penalty ? Math.max(0, Math.round((expectedRaw - 5) * 10) / 10) : expectedRaw;
   check("finalScore = average of the TWO unit scores", row.final_score === expected, JSON.stringify({ final: row.final_score, expected, u1: r[0].score, u2: r[1].score }));
   check("maxScore is still 25", row.max_score === 25);
-  check("modelAnswer for Unit 2 may exceed Unit 1's 1500-char cap (own, larger cap)", r[1].modelAnswer.length > 600);
+  check("Unit 2 stores TWO improved answers (one per pupil answer), each longer than Unit 1's old cap allows for a pair", Array.isArray(r[1].modelAnswers) && r[1].modelAnswers.length === 2 && r[1].modelAnswers.every((m) => m.length > 600) && r[1].modelAnswer.length > 1200);
   check("teacher-only coachUsed kept on both units, Q2/Q3 split recorded", r[0].coachUsed === true && r[1].coachUsed === true && r[1].coachUsedQuestions[0] === false && r[1].coachUsedQuestions[1] === true);
 }
 
@@ -307,13 +308,13 @@ let env1, id1;
   const sub = await submitDistinct(env1, "pup1");
   const rec = sub.data.record;
   check("submit response keeps finalScore + maxScore", typeof rec.finalScore === "number" && rec.maxScore === 25);
-  check("submit response has no per-unit score/max/breakdown", rec.rounds.every((r) => !("score" in r) && !("max" in r) && !("breakdown" in r)));
+  check("v7.7: the pupil's own submit response includes per-unit score, max and breakdown", rec.rounds.every((r) => typeof r.score === "number" && r.max === 25 && Array.isArray(r.breakdown) && r.breakdown.length > 0));
   check("submit response still has written feedback, suggestion and stronger version for each unit", rec.rounds.every((r) => r.feedback && r.suggestion !== undefined && "modelAnswer" in r));
   check("submit response has no coachUsed", rec.rounds.every((r) => !("coachUsed" in r) && !("coachUsedQuestions" in r)));
   check("pupil record keeps the question/answers so the result screen can show them", rec.rounds[1].questions.length === 2 && rec.rounds[1].answers.length === 2);
 
   const mine = await get(env1, "/api/submissions/mine", "pup1");
-  check("/mine: no per-unit scores or breakdown for the owner either", mine.data.submissions.length >= 1 && mine.data.submissions.every((s) => s.rounds.every((r) => !("score" in r) && !("breakdown" in r) && !("max" in r))));
+  check("/mine: the owner gets per-unit scores and breakdown", mine.data.submissions.length >= 1 && mine.data.submissions.every((s) => s.rounds.every((r) => typeof r.score === "number" && Array.isArray(r.breakdown))));
   check("/mine still exposes the overall finalScore", mine.data.submissions.every((s) => typeof s.finalScore === "number"));
 
   const lb = await get(env1, "/api/submissions/leaderboard", "pup2");
@@ -374,7 +375,7 @@ let env1, id1;
   check("not on the leaderboard until Unit 1 is also fixed", r1.data.addedToLeaderboard === false && r1.data.submission.gradingDegraded === true);
   const r0 = await remark(0);
   check("re-marking Unit 1 is a Q1-only call (no Q2/Q3 text) and finishes the job", calls.length === 2 && !calls[1].isUnit2 && !/experience TWO/.test(calls[1].user) && r0.data.addedToLeaderboard === true);
-  check("re-mark responses to the pupil carry no per-unit scores", r0.data.submission.rounds.every((r) => !("score" in r) && !("breakdown" in r)));
+  check("re-mark responses to the pupil carry their own per-unit scores", r0.data.submission.rounds.every((r) => typeof r.score === "number" && Array.isArray(r.breakdown)));
   const hist = env.CCv6_DB._state.history;
   const breakdown = JSON.parse(hist[hist.length - 1][6]);
   const by = Object.fromEntries(breakdown.map((b) => [b.part, b]));
@@ -397,7 +398,7 @@ let env1, id1;
   check("legacy finalScore still divides by 3: (12+12+24)/3 = 16", ov.data.submission.finalScore === 16, ov.data.submission.finalScore);
   const mine = await get(env, "/api/submissions/mine", "pup1");
   const s = mine.data.submissions.find((x) => x.id === "legacy1");
-  check("legacy submission is redacted for pupils the same way", s && s.rounds.length === 3 && s.rounds.every((r) => !("score" in r) && !("breakdown" in r)) && s.finalScore === 16);
+  check("v7.7: the owner sees a legacy 3-question submission's per-question breakdown too", s && s.rounds.length === 3 && s.rounds.every((r) => typeof r.score === "number" && Array.isArray(r.breakdown)) && s.finalScore === 16);
 }
 
 // ============================================================
