@@ -21,7 +21,7 @@ database_id = "e59f0f2b-fde6-4e57-b998-7074aa7da318"
 # built in). Create with:  wrangler kv:namespace create CCv6_DATA
 # Then paste the returned id below.
 kv_namespaces = [
-  { binding = "CCv6_DATA", id = "e1815085e13c4be092a5162986f77e16" }
+  { binding = "CCv7_DATA", id = "e1815085e13c4be092a5162986f77e16" }
 ]
 
 # --- Teacher password ---
