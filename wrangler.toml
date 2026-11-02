@@ -12,7 +12,7 @@ compatibility_date = "2024-11-01"
 # (drop --remote to also/instead set up a local dev database)
 [[d1_databases]]
 binding = "CCv6_DB"
-database_name = "chitchat-v7"
+database_name = "chitchat-v7" 
 database_id = "e59f0f2b-fde6-4e57-b998-7074aa7da318"
 
 # --- KV namespace ---
