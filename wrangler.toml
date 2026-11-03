@@ -12,7 +12,7 @@ compatibility_date = "2024-11-01"
 # (drop --remote to also/instead set up a local dev database)
 [[d1_databases]]
 binding = "CCv6_DB"
-database_name = "chitchat-v7" 
+database_name = "chitchat-v7"
 database_id = "e59f0f2b-fde6-4e57-b998-7074aa7da318"
 
 # --- KV namespace ---
@@ -20,9 +20,12 @@ database_id = "e59f0f2b-fde6-4e57-b998-7074aa7da318"
 # expirationTtl gives free automatic session expiry that D1 doesn't have
 # built in). Create with:  wrangler kv:namespace create CCv6_DATA
 # Then paste the returned id below.
-kv_namespaces = [
-  { binding = "CCv6_DATA", id = "e1815085e13c4be092a5162986f77e16" }
-]
+# NOTE: must be a [[kv_namespaces]] table of its own. A bare `kv_namespaces = [...]`
+# line placed after [[d1_databases]] is parsed as a key INSIDE the D1 entry, so the
+# KV binding silently never exists (env.CCv6_DATA is undefined at runtime).
+[[kv_namespaces]]
+binding = "CCv6_DATA"
+id = "e1815085e13c4be092a5162986f77e16"
 
 # --- Teacher password ---
 # Lives in D1 (config table, key "teacher_password"), not hardcoded in this
