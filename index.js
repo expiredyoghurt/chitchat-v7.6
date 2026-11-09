@@ -1358,7 +1358,7 @@ const aiHealth = new Map();
 // actual entry point is the default export below, which never calls this.
 // Exists purely so tests can isolate scenarios from each other without
 // waiting out real cooldown timers (see tests/ai-reliability.test.mjs).
-export { computeProgressSeries, redactForPupil, attentionReasons, computeAnalyticsExtras };
+export { computePupilSkillMinis, computeProgressSeries, redactForPupil, attentionReasons, computeAnalyticsExtras, skillsOfRounds, buildSkillWeb, computeSkillInsights, scaleBreakdownToScore };
 
 export function __resetAiHealthForTests() {
   aiHealth.clear();
@@ -2638,6 +2638,7 @@ async function retryRoundModelAnswers(env, row, roundIndex) {
 // scoped teacher-admin's WHERE clause is built from their assignedClasses,
 // so out-of-scope rows are never even read out of D1.
 function rowToSubmission(row) {
+  const rounds = JSON.parse(row.rounds || "[]");
   return {
     id: row.id,
     pupilName: row.pupil_name,
@@ -2645,7 +2646,10 @@ function rowToSubmission(row) {
     topicId: row.topic_id,
     topicTitle: row.topic_title,
     mode: row.mode,
-    rounds: JSON.parse(row.rounds || "[]"),
+    rounds,
+    // v7.10: this attempt's skill marks, derived from rounds on every read (so a re-mark or an
+    // override is reflected immediately). Pupils get it only for their own entries - see redactForPupil.
+    skills: skillsOfRounds(rounds),
     finalScore: row.final_score,
     maxScore: row.max_score,
     flagged: !!row.flagged,
@@ -2696,9 +2700,11 @@ function redactForPupil(submission, isOwner) {
   // v7.9: the review tick is a teacher's private to-do marker. The teacher's note
   // to a pupil is the pupil's OWN to read (text + date, not who wrote it); a
   // classmate never gets it.
-  const { teacherComment, reviewedAt, reviewedBy, ...base } = stripped;
+  const { teacherComment, reviewedAt, reviewedBy, skills: _skills, ...base } = stripped;
   return {
     ...base,
+    // v7.10: skill marks are marks, so like the breakdown they go to the owner only
+    ...(isOwner ? { skills: skillsOfRounds(base.rounds) } : {}),
     ...(isOwner && teacherComment ? { teacherComment: { text: teacherComment.text, at: teacherComment.at } } : {}),
     rounds: base.rounds.map((r) => {
       // Teacher-only in every case: who adjusted a score, when, and what it was before.
@@ -2785,6 +2791,336 @@ function computeAnalytics(rows) {
   };
 }
 
+// ====================================================================
+// v7.10 - SKILL WEB
+// ====================================================================
+// The "character skill web" is computed fresh from the stored `rounds` JSON every
+// time it is asked for (pupil My Progress, a result screen, the teacher's pupil
+// report, class Insights). Nothing is cached or stored, so an AI re-mark or a
+// teacher score override shows up the next time the web is built - there is no
+// separate number to keep in step.
+//
+// Eight skills = the eight parts the marker actually assesses. Experience can be
+// opened up into its sub-skills (Relevance, 5W1H ... Depth).
+//   Thought / Reason / Evidence: marked in Question 1 only (Unit 2 records them as
+//   Present / Not observed with no marks). Suggestion, Experience and the three
+//   Language parts are marked in both units, so they are pooled as points / max.
+const SKILL_AXES = [
+  { key: "Thought", label: "Thought" },
+  { key: "Reason", label: "Reason" },
+  { key: "Evidence", label: "Evidence" },
+  { key: "Experience", label: "Experience" },
+  { key: "Suggestion", label: "Suggestion" },
+  { key: "Grammar", label: "Grammar" },
+  { key: "Vocabulary", label: "Vocabulary" },
+  { key: "Fluency", label: "Fluency" },
+];
+const SKILL_SUB_ORDER = [
+  "Relevance",
+  "5W1H Specificity",
+  "Authenticity / Personal Voice",
+  "Clarity & Sequence",
+  "Reflection / Lesson Learnt",
+  "Depth & Development Across Both Answers",
+];
+const SKILL_WEB_WINDOW = 5; // the web shows the last 5 usable attempts; the 5 before that are the "earlier" outline
+
+function skillKeyForPart(part) {
+  const p = String(part || "").trim().toLowerCase();
+  if (p.startsWith("thought")) return "Thought";
+  if (p.startsWith("reason")) return "Reason";
+  if (p.startsWith("evidence")) return "Evidence";
+  if (p.startsWith("experience")) return "Experience";
+  if (p.startsWith("suggestion")) return "Suggestion";
+  if (p.startsWith("grammar")) return "Grammar";
+  if (p.startsWith("vocab")) return "Vocabulary";
+  if (p.startsWith("fluency")) return "Fluency";
+  return null;
+}
+
+const round2 = (n) => Math.round(n * 100) / 100;
+
+// Spread a teacher's overridden unit score back over the criteria. The teacher sets ONE
+// number for the unit, so the shape inside the unit is the marker's own shape scaled up
+// or down to that number (criteria never exceed their maximum; any overflow is handed
+// to the criteria that still have room). If the stored breakdown is all zeros the score
+// is shared out in proportion to each criterion's maximum.
+function scaleBreakdownToScore(breakdown, target) {
+  const items = (Array.isArray(breakdown) ? breakdown : [])
+    .filter((b) => b && Number(b.max) > 0)
+    .map((b) => ({ b, max: Number(b.max), pts: Math.max(0, Math.min(Number(b.max), Number(b.points) || 0)) }));
+  if (!items.length) return [];
+  const maxSum = items.reduce((s, i) => s + i.max, 0);
+  const t = Math.max(0, Math.min(maxSum, Number(target) || 0));
+  const curSum = items.reduce((s, i) => s + i.pts, 0);
+  let out = curSum > 0 ? items.map((i) => (i.pts * t) / curSum) : items.map((i) => (t * i.max) / maxSum);
+  for (let iter = 0; iter < 8; iter++) {
+    let over = 0;
+    out = out.map((p, i) => {
+      if (p > items[i].max) {
+        over += p - items[i].max;
+        return items[i].max;
+      }
+      return p;
+    });
+    if (over <= 1e-9) break;
+    const room = out.map((p, i) => items[i].max - p);
+    const roomSum = room.reduce((s, r) => s + r, 0);
+    if (roomSum <= 1e-9) break;
+    out = out.map((p, i) => p + (over * room[i]) / roomSum);
+  }
+  return items.map((it, i) => {
+    const newPts = out[i];
+    const sub = Array.isArray(it.b.subBreakdown)
+      ? it.b.subBreakdown.map((s) => {
+          const sMax = Number(s && s.max) || 0;
+          const sPts = Number(s && s.points) || 0;
+          const scaled = it.pts > 0 ? (sPts * newPts) / it.pts : (newPts * sMax) / it.max;
+          return { ...s, points: round2(Math.max(0, Math.min(sMax, scaled))) };
+        })
+      : undefined;
+    return { ...it.b, points: round2(newPts), adjusted: true, ...(sub ? { subBreakdown: sub } : {}) };
+  });
+}
+
+// A round counts toward the web once a real AI marked it, or a teacher marked it (override).
+// A round still carrying only the offline estimate is left out until then.
+function roundSkillEligible(r) {
+  return !!r && (r.markedBy !== "fallback" || !!r.overridden);
+}
+// The breakdown to read skills from. After a teacher override the unit score is the
+// teacher's number, so the criteria are scaled to it; otherwise the stored breakdown as is.
+function effectiveBreakdown(r) {
+  const bd = Array.isArray(r && r.breakdown) ? r.breakdown : [];
+  if (r && r.overridden && Number.isFinite(r.score)) {
+    const sum = bd.reduce((s, b) => s + (b && Number(b.max) > 0 ? Number(b.points) || 0 : 0), 0);
+    if (Math.abs(sum - r.score) > 0.05) return scaleBreakdownToScore(bd, r.score);
+  }
+  return bd;
+}
+
+// One attempt's skills: points / max per skill (and per Experience sub-skill), plus how many
+// rounds were used and how many were left out as still offline-estimated.
+function skillsOfRounds(rounds) {
+  const axes = {};
+  const sub = {};
+  let used = 0;
+  let excluded = 0;
+  let staffMarked = 0;
+  let adjusted = false;
+  const list = Array.isArray(rounds) ? rounds : [];
+  for (const r of list) {
+    if (!r) continue;
+    if (!roundSkillEligible(r)) {
+      excluded++;
+      continue;
+    }
+    let any = false;
+    for (const b of effectiveBreakdown(r)) {
+      if (!b || !(Number(b.max) > 0)) continue;
+      const key = skillKeyForPart(b.part);
+      if (!key) continue;
+      const a = axes[key] || (axes[key] = { points: 0, max: 0 });
+      a.points = round2(a.points + (Number(b.points) || 0));
+      a.max = round2(a.max + Number(b.max));
+      if (key === "Experience" && Array.isArray(b.subBreakdown)) {
+        for (const s of b.subBreakdown) {
+          if (!s || typeof s.label !== "string" || !(Number(s.max) > 0)) continue;
+          const t = sub[s.label] || (sub[s.label] = { points: 0, max: 0 });
+          t.points = round2(t.points + (Number(s.points) || 0));
+          t.max = round2(t.max + Number(s.max));
+        }
+      }
+      if (b.adjusted) adjusted = true;
+      any = true;
+    }
+    if (any) {
+      used++;
+      if (r.markedBy === "fallback" && r.overridden) staffMarked++;
+    }
+  }
+  return { axes, sub, used, excluded, staffMarked, adjusted, total: list.length };
+}
+
+function mergeSkills(list) {
+  const axes = {};
+  const sub = {};
+  let used = 0;
+  let excluded = 0;
+  let staffMarked = 0;
+  let adjusted = false;
+  for (const s of list) {
+    if (!s) continue;
+    used += s.used || 0;
+    excluded += s.excluded || 0;
+    staffMarked += s.staffMarked || 0;
+    if (s.adjusted) adjusted = true;
+    for (const [k, v] of Object.entries(s.axes || {})) {
+      const a = axes[k] || (axes[k] = { points: 0, max: 0 });
+      a.points += v.points;
+      a.max += v.max;
+    }
+    for (const [k, v] of Object.entries(s.sub || {})) {
+      const a = sub[k] || (sub[k] = { points: 0, max: 0 });
+      a.points += v.points;
+      a.max += v.max;
+    }
+  }
+  return { axes, sub, used, excluded, staffMarked, adjusted };
+}
+
+const pctOf = (v) => (v && v.max > 0 ? Math.round((v.points / v.max) * 100) : null);
+function axesToPcts(merged) {
+  return SKILL_AXES.map((ax) => ({ key: ax.key, label: ax.label, pct: pctOf(merged && merged.axes[ax.key]) }));
+}
+function subToPcts(merged, prevMerged) {
+  const labels = SKILL_SUB_ORDER.filter((l) => merged.sub[l] || (prevMerged && prevMerged.sub[l]));
+  for (const l of Object.keys(merged.sub)) if (!labels.includes(l)) labels.push(l);
+  return labels.map((l) => ({ label: l, pct: pctOf(merged.sub[l]), prevPct: prevMerged ? pctOf(prevMerged.sub[l]) : null }));
+}
+
+// Which attempts feed a pupil's web: non-practice attempts that have at least one usable round
+// (practice ones too when asked; practice-only when that is all there is).
+function skillPool(entries, includePractice) {
+  const usable = (e) => e.skills && e.skills.used > 0;
+  let pool = entries.filter((e) => usable(e) && (includePractice || !e.practice));
+  let practiceOnly = false;
+  if (!includePractice && pool.length === 0) {
+    pool = entries.filter(usable);
+    practiceOnly = pool.length > 0;
+  }
+  return { pool, practiceOnly };
+}
+
+// entries: oldest first, each with .skills (skillsOfRounds) and .practice.
+function buildSkillWeb(entries, includePractice, win) {
+  const w = win || SKILL_WEB_WINDOW;
+  const { pool, practiceOnly } = skillPool(entries, includePractice);
+  const cur = pool.slice(-w);
+  const prev = pool.length > w ? pool.slice(-2 * w, -w) : [];
+  const mc = mergeSkills(cur.map((e) => e.skills));
+  const mp = prev.length ? mergeSkills(prev.map((e) => e.skills)) : null;
+  const curAxes = axesToPcts(mc);
+  const prevAxes = mp ? axesToPcts(mp) : null;
+  const axes = curAxes.map((a, i) => {
+    const prevPct = prevAxes ? prevAxes[i].pct : null;
+    return { key: a.key, label: a.label, pct: a.pct, prevPct, delta: a.pct !== null && prevPct !== null ? a.pct - prevPct : null };
+  });
+  // "parts left out" is counted over the most recent attempts being considered (usable or not)
+  const considered = entries.filter((e) => includePractice || practiceOnly || !e.practice).slice(-w);
+  const excludedRounds = considered.reduce((s, e) => s + ((e.skills && e.skills.excluded) || 0), 0);
+  return {
+    window: w,
+    n: cur.length,
+    nPrev: prev.length,
+    practiceOnly,
+    axes,
+    sub: cur.length ? subToPcts(mc, mp) : [],
+    excludedRounds,
+    staffMarked: mc.staffMarked,
+    adjusted: mc.adjusted,
+  };
+}
+
+// Teacher's pupil report: latest window, first window (only when it differs), class average.
+function buildSkillReport(entries, classRows) {
+  const w = SKILL_WEB_WINDOW;
+  const { pool, practiceOnly } = skillPool(entries, false);
+  const latest = buildSkillWeb(entries, false, w);
+  let first = null;
+  if (pool.length > w) {
+    const mf = mergeSkills(pool.slice(0, w).map((e) => e.skills));
+    first = { n: Math.min(w, pool.length), axes: axesToPcts(mf) };
+  }
+  let classAvg = null;
+  if (Array.isArray(classRows) && classRows.length) {
+    const parts = [];
+    for (const row of classRows) {
+      let rounds;
+      try {
+        rounds = JSON.parse(row.rounds || "[]");
+      } catch (e) {
+        continue;
+      }
+      const sk = skillsOfRounds(rounds);
+      if (sk.used > 0) parts.push(sk);
+    }
+    if (parts.length) classAvg = { n: parts.length, axes: axesToPcts(mergeSkills(parts)) };
+  }
+  return { window: w, practiceOnly, latest, first, classAvg };
+}
+
+// v8.0: one small skill shape per pupil for the teacher's Pupils list. Same rules as the web
+// (non-practice, parts marked by an AI or a teacher, last 5 usable attempts), built from the rows.
+function computePupilSkillMinis(rows) {
+  const groups = new Map();
+  for (const row of rows || []) {
+    let rounds;
+    try {
+      rounds = JSON.parse(row.rounds || "[]");
+    } catch (e) {
+      continue;
+    }
+    const cls = row.pupil_class || "unassigned";
+    const key = String(row.pupil_name || "").toLowerCase() + "|" + String(cls).toLowerCase();
+    let g = groups.get(key);
+    if (!g) {
+      g = { name: row.pupil_name, pupilClass: cls, entries: [] };
+      groups.set(key, g);
+    }
+    g.entries.push({ createdAt: row.created_at, practice: false, skills: skillsOfRounds(rounds) });
+  }
+  const out = [];
+  for (const g of groups.values()) {
+    g.entries.sort((a, b) => a.createdAt - b.createdAt);
+    const { pool } = skillPool(g.entries, false);
+    const cur = pool.slice(-SKILL_WEB_WINDOW);
+    out.push({ name: g.name, pupilClass: g.pupilClass, n: cur.length, pcts: cur.length ? axesToPcts(mergeSkills(cur.map((e) => e.skills))).map((a) => a.pct) : SKILL_AXES.map(() => null) });
+  }
+  return out;
+}
+
+// Class Insights: overall + per class + per topic, from the filtered rows (any attempt whose
+// parts are AI- or teacher-marked contributes the parts that qualify).
+function computeSkillInsights(rows) {
+  const overall = [];
+  const byClass = {};
+  const byTopic = {};
+  let n = 0;
+  let excludedRounds = 0;
+  for (const row of rows || []) {
+    let rounds;
+    try {
+      rounds = JSON.parse(row.rounds || "[]");
+    } catch (e) {
+      continue;
+    }
+    const sk = skillsOfRounds(rounds);
+    excludedRounds += sk.excluded;
+    if (sk.used === 0) continue;
+    n++;
+    overall.push(sk);
+    const cls = row.pupil_class || "unassigned";
+    const title = row.topic_title || "(untitled)";
+    (byClass[cls] = byClass[cls] || []).push(sk);
+    (byTopic[title] = byTopic[title] || []).push(sk);
+  }
+  const mo = mergeSkills(overall);
+  const group = (map, nameKey) =>
+    Object.entries(map)
+      .map(([name, list]) => ({ [nameKey]: name, n: list.length, axes: axesToPcts(mergeSkills(list)) }))
+      .sort((a, b) => b.n - a.n || String(a[nameKey]).localeCompare(String(b[nameKey])))
+      .slice(0, 12);
+  return {
+    n,
+    excludedRounds,
+    overall: axesToPcts(mo),
+    sub: n ? subToPcts(mo, null).map((s) => ({ label: s.label, pct: s.pct })) : [],
+    byClass: group(byClass, "pupilClass"),
+    byTopic: group(byTopic, "topic"),
+  };
+}
+
 // v7.8 - one pupil's progress over time, from their own stored rows. Shared by
 // the pupil's My Progress tab (GET /api/pupil/progress) and, in v7.9, the
 // teacher's pupil report. Takes D1 rows in ANY order and returns them oldest
@@ -2807,7 +3143,11 @@ function computeProgressSeries(rows) {
     for (const r of rounds) {
       if (!r) continue;
       units.push({ score: Number.isFinite(r.score) ? r.score : 0, max: Number.isFinite(r.max) ? r.max : 0 });
-      for (const b of r.breakdown || []) {
+      // v7.10: parts still marked only by the offline estimate are left out of the strongest /
+      // weakest figures too (until an AI re-marks them or a teacher marks them), so these agree
+      // with the skill web. After a teacher override the criteria follow the teacher's score.
+      if (!roundSkillEligible(r)) continue;
+      for (const b of effectiveBreakdown(r)) {
         if (!b || typeof b.part !== "string") continue;
         criteria.push({ part: b.part, points: Number(b.points) || 0, max: Number(b.max) || 0 });
       }
@@ -2823,6 +3163,7 @@ function computeProgressSeries(rows) {
       retryOf: row.retry_of || null,
       units,
       criteria,
+      skills: skillsOfRounds(rounds),
     });
   }
   entries.sort((a, b) => a.createdAt - b.createdAt);
@@ -2885,6 +3226,8 @@ function computeProgressSeries(rows) {
       weakest,
       criteria: crit,
       mostImproved,
+      skillWeb: buildSkillWeb(entries, false),
+      skillWebAll: buildSkillWeb(entries, true),
     },
   };
 }
@@ -2969,7 +3312,7 @@ function submissionHasFallback(sub) {
 }
 
 // ---- teacher pupil report (B3) ----
-function buildPupilReport(rows, pupil) {
+function buildPupilReport(rows, pupil, classRows) {
   const series = computeProgressSeries(rows);
   const byId = {};
   for (const row of rows) byId[row.id] = row;
@@ -2991,7 +3334,7 @@ function buildPupilReport(rows, pupil) {
     if (first) retries.push({ topicTitle: e.topicTitle, firstId: first.id, secondId: e.id, first: first.finalScore, second: e.finalScore, max: e.maxScore, gain: Math.round((e.finalScore - first.finalScore) * 10) / 10 });
   }
   const comments = attempts.filter((a) => a.comment).map((a) => ({ id: a.id, createdAt: a.createdAt, topicTitle: a.topicTitle, comment: a.comment }));
-  return { pupil, series, attempts, retries, comments, generatedAt: Date.now() };
+  return { pupil, series, attempts, retries, comments, skillWeb: buildSkillReport(series.entries, classRows), generatedAt: Date.now() };
 }
 
 // ---- analytics extras (B5): topic x criterion heatmap and weekly trend ----
@@ -4351,7 +4694,12 @@ export default {
         if (!name) return badRequest("Missing pupil name.");
         if (!classAllowed(session, pupilClass)) return json({ error: "Not authorised for this pupil's class." }, 403);
         const { results } = await env.CCv6_DB.prepare("SELECT * FROM submissions WHERE pupil_name = ? AND pupil_class = ? ORDER BY created_at DESC LIMIT 200").bind(name, pupilClass).all();
-        return json(buildPupilReport(results || [], { name, pupilClass }));
+        // v7.10: the class's non-practice rows, for the "class average" outline on the skill web
+        const classRes = await env.CCv6_DB
+          .prepare("SELECT pupil_class, topic_title, rounds, final_score, max_score, created_at FROM submissions WHERE LOWER(pupil_class) = LOWER(?) AND practice = 0 AND archived = 0 ORDER BY created_at DESC LIMIT 600")
+          .bind(pupilClass)
+          .all();
+        return json(buildPupilReport(results || [], { name, pupilClass }, classRes.results || []));
       }
 
       // GET /api/teacher/alerts - dashboard banner + AI provider usage (B6). Scoped like everything else.
@@ -4462,7 +4810,18 @@ export default {
         const all = results || [];
         const capped = all.length > 2000;
         const rows = capped ? all.slice(0, 2000) : all;
-        return json({ ...computeAnalytics(rows), ...computeAnalyticsExtras(rows), capped, window: 2000, range: { from: fromMs, to: toMs } });
+        // v7.10: the skill web also takes submissions that still carry an offline part which a
+        // teacher has marked (grading_degraded stays 1 after an override), so it reads its own
+        // rows (same filters, same window) and decides part by part what qualifies.
+        let w2 = (whereSql ? whereSql + " AND " : "WHERE ") + "practice = 0";
+        const bind2 = params.slice();
+        if (fromMs !== null) { w2 += " AND created_at >= ?"; bind2.push(fromMs); }
+        if (toMs !== null) { w2 += " AND created_at <= ?"; bind2.push(toMs); }
+        const skillRes = await env.CCv6_DB
+          .prepare(`SELECT pupil_class, topic_title, rounds, final_score, max_score, created_at FROM submissions ${w2} ORDER BY created_at DESC LIMIT 2000`)
+          .bind(...bind2)
+          .all();
+        return json({ ...computeAnalytics(rows), ...computeAnalyticsExtras(rows), skillWeb: computeSkillInsights(skillRes.results || []), capped, window: 2000, range: { from: fromMs, to: toMs } });
       }
 
       // v7.5 - separate rubric for Unit 2 (Questions 2 + 3 marked together).
@@ -4658,6 +5017,31 @@ export default {
         const whereSql = where.length ? "WHERE " + where.join(" AND ") : "";
         const { results } = await env.CCv6_DB.prepare(`SELECT * FROM pupils ${whereSql} ORDER BY pupil_class, name`).bind(...params).all();
         return json({ pupils: results.map(rowToPupil) });
+      }
+
+      // v8.0: small skill shapes for the Pupils list (one per pupil, last 5 usable attempts each).
+      if (pathname === "/api/teacher/pupil-skills" && request.method === "GET") {
+        if (!requireTeacher(session)) return json({ error: "Not authorised." }, 403);
+        const where = ["practice = 0", "archived = 0"];
+        const params = [];
+        if (!session.isSuperAdmin) {
+          const classes = (session.assignedClasses || []).map((c) => String(c).toLowerCase());
+          if (!classes.length) return json({ pupils: [], capped: false });
+          where.push(`LOWER(pupil_class) IN (${classes.map(() => "?").join(",")})`);
+          params.push(...classes);
+        }
+        const classParam = (url.searchParams.get("class") || "").trim();
+        if (classParam) {
+          where.push("LOWER(pupil_class) = LOWER(?)");
+          params.push(classParam);
+        }
+        const { results } = await env.CCv6_DB
+          .prepare(`SELECT * FROM submissions WHERE ${where.join(" AND ")} ORDER BY created_at DESC LIMIT 3001`)
+          .bind(...params)
+          .all();
+        const all = results || [];
+        const capped = all.length > 3000;
+        return json({ pupils: computePupilSkillMinis(capped ? all.slice(0, 3000) : all), capped });
       }
 
       // Distinct class names this session may see - powers the Class filter

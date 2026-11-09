@@ -5,6 +5,78 @@ built as a single Cloudflare Worker: one file serves the pupil-facing game,
 the leaderboard, and hidden teacher tools, backed by D1 (Cloudflare's SQLite
 database) with Workers KV used only for session tokens.
 
+## What's new in v8.0 — a friendlier skill web
+
+**Deploy:** upload the new files. There is **no database step**. One new read-only endpoint
+(`GET /api/teacher/pupil-skills`) is added.
+
+- **Tap the chart.** Each skill name on the web is a real button (tap, Enter or Space). It opens that
+  skill's details, highlights its spoke and its list row, and keeps the keyboard where it was. The details
+  now sit directly under the chart.
+- **Words first on results.** The result screen and the first-try / second-try panel start with a plain
+  sentence ("Level up! Thought grew from Sprout to Tree", or "A little dip: Vocabulary - worth another
+  look"). The per-skill chips are behind "See every skill".
+- **Visible keyboard focus.** The page already had a blue focus ring; v8.0 adds a white halo so it shows on
+  green buttons too, draws its own ring on the chart's labels, and makes **topic cards keyboard
+  buttons** (they were mouse/touch only).
+- **First-use hint.** A one-line "solid = now, dashed = before" note with a "Got it" button, remembered per
+  pupil on that device (localStorage key `chitchat:swhint:v1:<name>|<class>`).
+- **Skill Coach.** "Ask the Coach about <skill>" (also on "Next quest") shows 3 sentence starters, a tip and
+  where the skill counts. It is built in and separate from the teacher-set topic Coach, so it does **not**
+  change the "Coach used" flags. "Practise this skill" sets a **quest**: a banner on the topic list, a
+  chip on the questions where that skill counts, and a "Quest check" line on the result.
+- **Mini skill shapes (teacher).** A small web beside every pupil in Pupils (last 5 counted attempts, same
+  rules as the full web), with a one-line key. Shapes are rebuilt on every load, so a re-mark or an
+  override shows up the next time the tab opens.
+- **Fixed:** the dotted gold "class average" line was 2.96:1 against the chart (under the 3:1 minimum for
+  chart lines); it is now 3.69:1.
+
+Tests: `tests/v80-backend.test.mjs`, `tests/v80-frontend.test.mjs`. Hand-off notes and the scopes for v8.1
+and v8.2 are in `handoff.md`.
+
+## What's new in v7.10 — the character skill web
+
+**No database step.** Upload the new files and you are done (nothing to run in D1). v7.10 only
+reads marks that are already stored.
+
+A **skill web** (radar chart) of the eight skills the marker actually assesses: **Thought, Reason,
+Evidence, Experience, Suggestion, Grammar, Vocabulary, Fluency**. Experience can be opened up into its
+sub-skills (Relevance, 5W1H, Authenticity, Clarity & Sequence, Reflection, Depth).
+
+- **Pupil, My Progress:** a "My Skill Web" card at the top. A solid shape is the last 5 counted
+  attempts, a dashed outline is the 5 before. Each skill has a level (Seedling, Sprout, Sapling, Tree,
+  Grand Oak), a % and an up/down arrow in words, a short tip, and a gentle "next quest". The pupil's
+  "character" title comes from their strongest skill. A button includes practice attempts.
+- **Pupil, result screen:** this attempt's web against the pupil's usual shape; after a second try, a
+  first-try vs second-try web inside the comparison panel.
+- **Teacher, pupil report (printable):** Latest 5 / First 5 / Class average, with a table of the same
+  numbers so a black-and-white print still has the figures.
+- **Teacher, Insights:** a **Skill web / Heatmap** toggle, with a "Compare with" menu (any class or topic
+  in the current filters) and a CSV export.
+- Lines differ by style and marker shape (solid + round, dashed + hollow, dotted + square), every number
+  is printed, and each web has a hidden table for screen readers.
+
+**Which marks count.** A part that was only marked by the offline keyword estimate is **left out of the
+web** until an AI re-marks it or a teacher marks it (score override). The web says how many parts are
+left out. Practice attempts are left out unless the pupil switches them on (or they are all there is).
+
+**It updates after a re-mark or an override.** Nothing is stored for the web: it is rebuilt from the stored
+marks every time it is shown, so an AI re-mark or a teacher override appears the next time it is
+opened (the app also drops its cached copy at that moment). A teacher override sets one number for a
+unit, so the skills inside that unit are the marker's own shape scaled to the teacher's number
+(no skill goes above its maximum). The report and Insights say when a teacher's override is included.
+
+**Also changed:** the pupil's "strongest" and "worth practising" figures now use the same rule
+(offline-estimated parts are left out), so they agree with the web.
+
+**Privacy.** Skill marks are marks, so they go to the pupil who owns the attempt and to teachers, never to
+classmates (same rule as the score breakdown since v7.7).
+
+Technical: `skillsOfRounds`, `buildSkillWeb`, `buildSkillReport`, `computeSkillInsights`,
+`scaleBreakdownToScore` in `index.js`; `skills` on every submission payload; `summary.skillWeb` /
+`skillWebAll` on `/api/pupil/progress`; `skillWeb` on `/api/teacher/pupil-progress` and
+`/api/teacher/analytics`. Tests: `tests/v710-backend.test.mjs`, `tests/v710-frontend.test.mjs`.
+
 ## What's new in v7.9 — teacher end: attention queue, notes, reports, alerts
 
 **One database step.** Existing installs run `migrations/v7_9.sql` once (five new columns

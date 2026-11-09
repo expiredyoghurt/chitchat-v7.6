@@ -143,6 +143,14 @@ export function makeDb(initialConfig, opts) {
     }
     // ---- pupils (teacher pupil view / progress report) ----
     if (/^SELECT \* FROM pupils WHERE name = \? AND pupil_class = \?/.test(s)) return { first: pupils.find((p) => p.name === params[0] && p.pupil_class === params[1]) || null };
+    // ---- pupil aggregate (used by the AI re-mark path) ----
+    if (/^SELECT id FROM pupils WHERE name = \? AND pupil_class = \?/.test(s)) { const p = pupils.find((x) => x.name === params[0] && x.pupil_class === params[1]); return { first: p ? { id: p.id } : null }; }
+    if (/^INSERT INTO pupils \(name, pupil_class, best_score, total_score, attempts\) VALUES .* RETURNING id/.test(s)) { const p = { id: pupils.length + 1, name: params[0], pupil_class: params[1], best_score: 0, total_score: 0, attempts: 0 }; pupils.push(p); return { first: { id: p.id } }; }
+    if (/^SELECT COUNT\(\*\) as attempts, COALESCE\(SUM\(final_score\), 0\) as total, COALESCE\(MAX\(final_score\), 0\) as best FROM submissions WHERE pupil_name = \? AND pupil_class = \? AND leaderboard_counted = 1/.test(s)) {
+      const rows = submissions.filter((r) => r.pupil_name === params[0] && r.pupil_class === params[1] && r.leaderboard_counted === 1);
+      return { first: { attempts: rows.length, total: rows.reduce((a, r) => a + r.final_score, 0), best: rows.reduce((m, r) => Math.max(m, r.final_score), 0) } };
+    }
+    if (/^UPDATE pupils SET attempts = \?, total_score = \?, best_score = \? WHERE id = \?/.test(s)) { const p = pupils.find((x) => x.id === params[3]); if (p) { p.attempts = params[0]; p.total_score = params[1]; p.best_score = params[2]; } return {}; }
     return { first: null, all: [] };
   }
 
