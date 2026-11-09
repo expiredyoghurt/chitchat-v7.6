@@ -88,9 +88,29 @@ string as `'...\n' +` lines; add new rules before the `@media print` block.
 Tests: plain Node scripts in `tests/`, run one at a time (`node tests/v80-frontend.test.mjs`). Front-end
 tests use jsdom (`npm install jsdom --no-save`); `tests/_fake.mjs` is the in-memory D1 used by the newer
 backend tests. A full run is `for f in tests/*.test.mjs; do node $f || echo FAIL $f; done`.
-All 19 test files pass at hand-off.
+All 20 test files pass at hand-off.
 
-### 1.5 Not verified
+### 1.5 v8.0.1 — login artwork (added after the first v8.0 hand-off)
+
+The two supplied sheets (10 portrait cards, 10 landscape banners) were cropped and shipped as WebP.
+
+- **Files:** `login-art.js` (base64 pictures + their pixel sizes; generated) and a route in `index.js`
+  (`loginArtResponse`, `/login-art/v1/<portrait|landscape>-<0..9>.webp`, one-year immutable cache, no database).
+  `login-art.js` must be deployed next to `index.js`.
+- **Page:** `loginArtIndex()` / `loginArtHtml()` in the `LOGINART_JS` block of `frontend.js`; a `<picture>`
+  with an upright-orientation `<source>`. Sequence: random start, then +1 per page open and per logout,
+  stored in `chitchat:loginart:v1`.
+- **Alignment:** index n is the same animal in both sets (0 penguin, 1 cat, 2 squirrel, 3 robot, 4 turtle,
+  5 crab, 6 panda, 7 winter penguin, 8 bunny); 9 is a cloud (portrait) or a fox (landscape).
+- **Changing the pictures later:** replace the images, regenerate `login-art.js`, and bump
+  `LOGIN_ART_VERSION` (it is in the URL, so browsers fetch the new set).
+- **Quality limit:** the source sheets are small (each card was about 300 px wide), so the portrait art is
+  stored at 288x480 and can look soft on high-density phone screens. Higher-resolution originals would fix
+  this; no code change is needed, only new files.
+- **Weight:** 550 KB for all 20 pictures inside the Worker bundle (about 730 KB as base64 text); a visit
+  downloads one picture.
+
+### 1.6 Not verified
 
 Everything was tested in jsdom and by rendering the SVG to an image. **No real browser, phone or
 Chromebook was used.** Part 4 is the checklist for that.
@@ -225,7 +245,7 @@ into CSS variables (`--sw-now`, `--sw-before`, `--sw-class`) so later theming wo
 - **Five illustrated level graphics** for Seedling → Sprout → Sapling → Tree → Grand Oak, used on the
   character card, the skill list, the result "level up" line and the passport.
 - **Empty-state illustrations**: no attempts yet, no web yet, no pupils, nothing to review.
-- A friendlier topic placeholder and a login hero.
+- A friendlier topic placeholder. (The login hero now exists as the v8.0.1 artwork; if the style set in B differs from it, decide whether to restyle or keep it.)
 - Style rules: rounded 2px strokes, the existing forest/gold palette, each icon under ~1.5 KB,
   decorative graphics `aria-hidden`, meaningful ones labelled.
 - **Decision needed:** growing tree only (recommended: simple, consistent with the level names), or a
@@ -325,6 +345,8 @@ offline-marked attempts.
       an AI re-mark or override the shape updates on the next visit.
 - [ ] Re-mark an offline part (pupil) and override a score (teacher): the web changes on the next view.
 - [ ] Print the pupil report in black and white: the web is readable and the table is present.
+- [ ] Login page: upright phone/tablet shows the portrait card, laptop shows the banner; the login box is
+      reachable without much scrolling; reload ten times (or clear the saved value) to confirm the order.
 
 ---
 
@@ -356,6 +378,8 @@ offline-marked attempts.
 | `index.js` | Worker: API, marking, skill helpers (`SKILL_AXES`, `skillsOfRounds`, `buildSkillWeb`, `buildSkillReport`, `computeSkillInsights`, `computePupilSkillMinis`, `scaleBreakdownToScore`) |
 | `frontend.js` | The whole UI as string arrays; the skill web lives in `SKILLWEB_JS` |
 | `tests/v710-*.test.mjs` | Skill web: server rules, UI, re-mark and override updates |
+| `login-art.js` | Generated: the 20 login pictures (base64 WebP) and their sizes |
+| `tests/v801-login-art.test.mjs` | v8.0.1: picture route, login-page markup, random start and in-order sequence |
 | `tests/v80-*.test.mjs` | v8.0: mini shapes endpoint; tappable chart, words-first summary, hint, Skill Coach and quest, minis UI, contrast |
 | `README.md` | Release notes (v7.10 and v8.0 at the top) |
 | `BROWSER_DEPLOY_GUIDE.md` | Deployment steps (no database step for v7.10 or v8.0) |

@@ -5,6 +5,29 @@ built as a single Cloudflare Worker: one file serves the pupil-facing game,
 the leaderboard, and hidden teacher tools, backed by D1 (Cloudflare's SQLite
 database) with Workers KV used only for session tokens.
 
+## What's new in v8.0.1 — login-page artwork
+
+**Deploy:** upload the new files **including the new `login-art.js`, which must sit next to `index.js`**
+(in `src/` if that is where `index.js` lives). No database step, no `wrangler.toml` change.
+
+- The login page (and the teacher-password step) now opens with one of **10 pictures**, cropped from the two
+  supplied sheets: **portrait cards** for phones and tablets held upright, **landscape banners** for
+  laptops, desktops and phones on their side. The browser picks the right one by itself.
+- **Order:** the first time on a device it starts at a **random** picture, then shows the **next one in
+  order** each time the page is opened (and each time someone logs out on a shared computer). Ten visits in
+  a row show all ten, then it starts again. It is remembered per device (`chitchat:loginart:v1`). If the
+  browser blocks storage it simply picks a random one.
+- The same animal appears in both versions at the same number (penguin, cat, squirrel, robot, turtle, crab,
+  panda, winter penguin, bunny). The 10th differs: a star cloud (portrait sheet only) and a fox (landscape
+  sheet only).
+- The pictures are served by the Worker at `/login-art/v1/...webp` and cached by the browser for a year, so
+  only the one picture a pupil needs is downloaded (about 20-45 KB). If a picture cannot load, the page falls
+  back to the old speech-bubble icon.
+- The picture is sized by screen height so the login box stays on screen on most phones; very small or
+  sideways phones scroll a little.
+
+Test: `tests/v801-login-art.test.mjs`.
+
 ## What's new in v8.0 — a friendlier skill web
 
 **Deploy:** upload the new files. There is **no database step**. One new read-only endpoint

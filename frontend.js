@@ -209,6 +209,15 @@ var HEAD =
   '.sw-mini-slot{display:inline-flex;width:56px;height:56px;flex:0 0 56px;align-items:center;justify-content:center;}\n' +
   '.sw-mini-none{color:var(--muted);font-weight:800;}\n' +
   '.sw-mini{display:block;}\n' +
+  '/* ---- v8.0.1: login artwork ---- */\n' +
+  '.login-art{width:100%;margin:0 0 16px;display:flex;justify-content:center;}\n' +
+  '.login-art picture{display:block;width:min(100%,940px,calc(30vh*var(--arn-l)));}\n' +
+  '.login-art img{display:block;width:100%;height:auto;aspect-ratio:var(--arn-l);border-radius:18px;box-shadow:var(--shadow);background:var(--sky);}\n' +
+  '.login-art.ok + .login-card .logo-big{display:none;}\n' +
+  '@media (orientation:portrait){\n' +
+  '.login-art picture{width:min(100%,calc(clamp(300px,46vh,620px)*var(--arn-p)));}\n' +
+  '.login-art img{aspect-ratio:var(--arn-p);}\n' +
+  '}\n' +
   '@media print{\n' +
   '  body *{visibility:hidden !important;}\n' +
   '  #pupilReport,#pupilReport *{visibility:visible !important;}\n' +
@@ -332,7 +341,7 @@ var APP_JS = [
 var LOGIN_JS = [
 "function loginHtml(){",
 "  if(state.pendingTeacherLogin){",
-"    return '<div class=\"center\">' +",
+"    return '<div class=\"center\">' + loginArtHtml() +",
 "      '<div class=\"card login-card stack\">' +",
 "      '<div class=\"logo-big\">&#128274;</div>' +",
 "      '<h2 style=\"margin:0;\">Teacher Tools</h2>' +",
@@ -343,7 +352,7 @@ var LOGIN_JS = [
 "      '<button class=\"btn-ghost\" data-action=\"cancel-teacher\">Back</button>' +",
 "      '</div></div></div>';",
 "  }",
-"  return '<div class=\"center\">' +",
+"  return '<div class=\"center\">' + loginArtHtml() +",
 "    '<div class=\"card login-card stack\">' +",
 "    '<div class=\"logo-big\">&#128172;</div>' +",
 "    '<h2 style=\"margin:0;\">Ready for a chit-chat?</h2>' +",
@@ -2210,6 +2219,35 @@ var SKILLWEB_JS = [
 "}"
 ];
 
+var LOGINART_JS = [
+"// ---------- v8.0.1: login-page artwork ----------",
+"// 10 portrait cards (phones and tablets held upright) and 10 landscape banners (laptops, desktops,",
+"// phones on their side). Index n is the same animal in both sets where possible. The pictures are",
+"// served by the Worker from /login-art/v1/ and cached by the browser.",
+"var LOGIN_ART_VERSION = 1;",
+"var LOGIN_ART_KEY = 'chitchat:loginart:v1';",
+"var LOGIN_ART_DIMS = {\"portrait\":[[288,480],[288,480],[288,480],[288,480],[288,480],[288,480],[288,480],[288,480],[288,480],[288,480]],\"landscape\":[[824,224],[824,224],[824,176],[824,176],[824,153],[824,159],[824,159],[824,165],[824,153],[824,165]]};",
+"// Start at a random picture the first time on a device, then go to the next one in order each time",
+"// the page is opened (and each time someone logs out on a shared computer). Fixed for the visit.",
+"function loginArtIndex(){",
+"  if(typeof state.loginArtIdx === 'number') return state.loginArtIdx;",
+"  var n = LOGIN_ART_DIMS.portrait.length, last = parseInt(storeGet(LOGIN_ART_KEY), 10), idx;",
+"  if(isNaN(last) || last < 0 || last >= n) idx = Math.floor(Math.random()*n);",
+"  else idx = (last + 1) % n;",
+"  storeSet(LOGIN_ART_KEY, String(idx));",
+"  state.loginArtIdx = idx;",
+"  return idx;",
+"}",
+"function loginArtHtml(){",
+"  var i = loginArtIndex(), pd = LOGIN_ART_DIMS.portrait[i], ld = LOGIN_ART_DIMS.landscape[i];",
+"  var base = '/login-art/v' + LOGIN_ART_VERSION + '/';",
+"  return '<div class=\"login-art\" style=\"--arn-p:' + (pd[0]/pd[1]).toFixed(4) + ';--arn-l:' + (ld[0]/ld[1]).toFixed(4) + ';\">' +",
+"    '<picture><source media=\"(orientation: portrait)\" srcset=\"' + base + 'portrait-' + i + '.webp\" width=\"' + pd[0] + '\" height=\"' + pd[1] + '\">' +",
+"    '<img src=\"' + base + 'landscape-' + i + '.webp\" width=\"' + ld[0] + '\" height=\"' + ld[1] + '\" alt=\"Just a Chit-Chat. Have a chat. Share your thoughts!\" decoding=\"async\" fetchpriority=\"high\" ' +",
+"    'onload=\"this.closest(\\'.login-art\\').classList.add(\\'ok\\')\" onerror=\"this.closest(\\'.login-art\\').style.display=\\'none\\'\"></picture></div>';",
+"}"
+];
+
 var TEACHER_JS = [
 "var SUBS_PAGE_SIZE = 50;",
 "function submissionsQueryString(){",
@@ -3920,7 +3958,7 @@ var EVENTS_JS = [
 "document.addEventListener('DOMContentLoaded', boot);"
 ];
 
-var SCRIPT_JS = APP_JS.concat(LOGIN_JS).concat(PUPIL_JS).concat(SKILLWEB_JS).concat(TEACHER_JS).concat(EVENTS_JS).join('\n');
+var SCRIPT_JS = APP_JS.concat(LOGIN_JS).concat(PUPIL_JS).concat(SKILLWEB_JS).concat(LOGINART_JS).concat(TEACHER_JS).concat(EVENTS_JS).join('\n');
 
 var BODY_CLOSE = '\n</script>\n</body>\n</html>';
 

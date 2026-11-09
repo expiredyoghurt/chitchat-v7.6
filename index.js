@@ -72,6 +72,7 @@
 
 import { VULGAR_WORDS } from "./vulgarity-list.js";
 import { PAGE_HTML } from "./frontend.js";
+import { LOGIN_ART, LOGIN_ART_VERSION } from "./login-art.js";
 import { SEED_TOPICS } from "./seed-topics.js";
 
 const TEACHER_USERNAME = "palpatine"; // trigger username for hidden teacher tools
@@ -1358,7 +1359,7 @@ const aiHealth = new Map();
 // actual entry point is the default export below, which never calls this.
 // Exists purely so tests can isolate scenarios from each other without
 // waiting out real cooldown timers (see tests/ai-reliability.test.mjs).
-export { computePupilSkillMinis, computeProgressSeries, redactForPupil, attentionReasons, computeAnalyticsExtras, skillsOfRounds, buildSkillWeb, computeSkillInsights, scaleBreakdownToScore };
+export { loginArtResponse, computePupilSkillMinis, computeProgressSeries, redactForPupil, attentionReasons, computeAnalyticsExtras, skillsOfRounds, buildSkillWeb, computeSkillInsights, scaleBreakdownToScore };
 
 export function __resetAiHealthForTests() {
   aiHealth.clear();
@@ -3647,6 +3648,28 @@ async function overrideSubmissionRoundScore(env, row, roundIndex, newScore, newF
 }
 
 
+// v8.0.1: login-page artwork. The images live in login-art.js (base64 WebP) and are served as
+// ordinary cacheable image files, so only the one picture a pupil needs is downloaded.
+const LOGIN_ART_BYTES = {}; // decoded once per Worker instance
+function loginArtResponse(kind, n) {
+  const list = LOGIN_ART[kind];
+  if (!list || !Number.isInteger(n) || n < 0 || n >= list.length) return new Response("Not found", { status: 404 });
+  const key = kind + n;
+  if (!LOGIN_ART_BYTES[key]) {
+    const bin = atob(list[n]);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    LOGIN_ART_BYTES[key] = bytes;
+  }
+  return new Response(LOGIN_ART_BYTES[key], {
+    headers: {
+      "content-type": "image/webp",
+      // the version is in the URL, so a new set of pictures just uses a new version number
+      "cache-control": "public, max-age=31536000, immutable",
+    },
+  });
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -3660,6 +3683,13 @@ export default {
           "access-control-allow-methods": "GET,POST,PUT,DELETE,OPTIONS",
         },
       });
+    }
+
+    // login artwork: static images, no database needed
+    const artMatch = /^\/login-art\/v(\d+)\/(portrait|landscape)-(\d{1,2})\.webp$/.exec(pathname);
+    if (artMatch && (request.method === "GET" || request.method === "HEAD")) {
+      if (Number(artMatch[1]) !== LOGIN_ART_VERSION) return new Response("Not found", { status: 404 });
+      return loginArtResponse(artMatch[2], Number(artMatch[3]));
     }
 
     await ensureSeeded(env);
