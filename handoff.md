@@ -90,7 +90,7 @@ tests use jsdom (`npm install jsdom --no-save`); `tests/_fake.mjs` is the in-mem
 backend tests. A full run is `for f in tests/*.test.mjs; do node $f || echo FAIL $f; done`.
 All 20 test files pass at hand-off.
 
-### 1.5 v8.0.1 — login artwork (added after the first v8.0 hand-off)
+### 1.5 v8.0.1 / v8.0.2 — login artwork (added after the first v8.0 hand-off)
 
 The two supplied sheets (10 portrait cards, 10 landscape banners) were cropped and shipped as WebP.
 
@@ -104,11 +104,17 @@ The two supplied sheets (10 portrait cards, 10 landscape banners) were cropped a
   5 crab, 6 panda, 7 winter penguin, 8 bunny); 9 is a cloud (portrait) or a fox (landscape).
 - **Changing the pictures later:** replace the images, regenerate `login-art.js`, and bump
   `LOGIN_ART_VERSION` (it is in the URL, so browsers fetch the new set).
-- **Quality limit:** the source sheets are small (each card was about 300 px wide), so the portrait art is
-  stored at 288x480 and can look soft on high-density phone screens. Higher-resolution originals would fix
-  this; no code change is needed, only new files.
-- **Weight:** 550 KB for all 20 pictures inside the Worker bundle (about 730 KB as base64 text); a visit
-  downloads one picture.
+- **Quality (v8.0.2):** the source sheets were small (cards about 300 px wide), so the pictures were
+  enlarged 2x with OpenCV's FSRCNN model (the small `FSRCNN_x2.pb` from Saafke/FSRCNN_Tensorflow) and
+  lightly sharpened (unsharp mask, sigma 0.9, amount 0.45), then encoded as WebP quality 74. Portrait
+  576x960; landscape 1236 px wide. A slower model (EDSR x2, about 3 minutes per picture on one CPU core)
+  looked almost the same, so it was not used. Higher-resolution originals would still beat any upscaling:
+  drop them in, regenerate `login-art.js` and bump `LOGIN_ART_VERSION`.
+- **Weight:** about 975 KB for all 20 pictures (1.3 MB as base64 text inside the Worker bundle, which is
+  about 1.9 MB uncompressed / 1.2 MB gzipped in total); a visit downloads one picture (about 40-60 KB).
+  Cloudflare's documented Worker size limit for the free plan was 3 MB compressed, and a recent notice
+  says the compressed limits were replaced by a 64 MiB uncompressed limit; the bundle is under 3 MB
+  either way. Check `wrangler deploy --dry-run` output if you add more pictures.
 
 ### 1.6 Not verified
 

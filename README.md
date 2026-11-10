@@ -5,6 +5,20 @@ built as a single Cloudflare Worker: one file serves the pupil-facing game,
 the leaderboard, and hidden teacher tools, backed by D1 (Cloudflare's SQLite
 database) with Workers KV used only for session tokens.
 
+## What's new in v8.0.2 — sharper login pictures
+
+**Deploy:** replace `login-art.js` (and `frontend.js`, `index.js`, which carry the new picture version
+number). Nothing else changes; no database step.
+
+- All 20 login pictures were **enlarged 2x with a neural upscaler (FSRCNN)** and **lightly sharpened**.
+  Portrait cards are now 576x960 (were 288x480); landscape banners are 1236 px wide (were 824). Sign text,
+  outlines and fur edges are visibly cleaner and less blocky, especially on high-density phone and laptop
+  screens. This sharpens edges; it cannot add detail that was never in the original sheets.
+- Each visit still downloads **one** picture (about 40-60 KB). The picture URLs moved to
+  `/login-art/v2/...`, so browsers fetch the new ones instead of showing cached old ones.
+- Worker bundle is now about 1.9 MB uncompressed (about 1.2 MB gzipped), up from about 0.6 MB.
+- Order, random start and layout are unchanged.
+
 ## What's new in v8.0.1 — login-page artwork
 
 **Deploy:** upload the new files **including the new `login-art.js`, which must sit next to `index.js`**
