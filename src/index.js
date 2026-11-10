@@ -72,6 +72,7 @@
 
 import { VULGAR_WORDS } from "./vulgarity-list.js";
 import { PAGE_HTML } from "./frontend.js";
+import { LOGIN_ART, LOGIN_ART_VERSION } from "./login-art.js";
 import { SEED_TOPICS } from "./seed-topics.js";
 
 const TEACHER_USERNAME = "palpatine"; // trigger username for hidden teacher tools
@@ -800,8 +801,18 @@ if (UNIT2_EXPERIENCE_SUB.reduce((sum, [, max]) => sum + max, 0) !== 16) throw ne
 
 // The "stronger version" for Unit 2 rewrites TWO answers' worth of story as
 // one, so it gets proportionally more room than Unit 1's single answer.
-const UNIT2_MODEL_ANSWER_MAX_CHARS = 2800;
-const UNIT2_MODEL_ANSWER_CEILING_WORDS = 400;
+// v7.7: doubled (was 2800 chars / 400 words) because Unit 2 now returns TWO
+// rewrites - one for the Q2 answer, one for the Q3 answer - and each may run as
+// long as the old single combined one. The cap below is the TOTAL for both;
+// each rewrite gets half of it.
+const UNIT2_MODEL_ANSWER_MAX_CHARS = 5600;
+const UNIT2_MODEL_ANSWER_CEILING_WORDS = 800;
+const UNIT2_MODEL_ANSWER_EACH_MAX_CHARS = UNIT2_MODEL_ANSWER_MAX_CHARS / 2;
+const UNIT2_MODEL_ANSWER_EACH_CEILING_WORDS = UNIT2_MODEL_ANSWER_CEILING_WORDS / 2;
+// Thought / Reason / Evidence are reported as Present / Not observed (never marked).
+const OBSERVED_PARTS = ["Thought", "Reason", "Evidence"];
+const OBSERVED_PRESENT = "Present";
+const OBSERVED_ABSENT = "Not observed";
 
 // Applied once per submission (not per round) when the pupil's three answers
 // reuse essentially the same idea/story across all three questions - see
@@ -1308,13 +1319,21 @@ function classifyThrownError(providerId, err) {
   return new AiError(AI_ERROR.UNKNOWN, `${providerId}: ${(err && err.message) || String(err)}`);
 }
 
-function extractJson(text) {
+function extractJson(text, expect) {
   let parsed;
   try {
     const cleaned = text.trim().replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/, "");
     parsed = JSON.parse(cleaned);
   } catch (e) {
     throw new AiError(AI_ERROR.MALFORMED_RESPONSE, "response was not valid JSON");
+  }
+  // v7.7: a "model-only" request (teacher's Retry AI suggested answer) expects
+  // the improved answer(s), not a marking breakdown. A MARKING reply is still
+  // rejected unless it has a breakdown, so a reply with only rewrites can never
+  // be silently turned into a zero score.
+  if (expect === "model") {
+    if (!parsed || (typeof parsed.modelAnswer !== "string" && !Array.isArray(parsed.modelAnswers))) throw new AiError(AI_ERROR.MALFORMED_RESPONSE, "response JSON was missing the expected improved answer(s)");
+    return parsed;
   }
   if (!parsed || !Array.isArray(parsed.breakdown)) throw new AiError(AI_ERROR.MALFORMED_RESPONSE, "response JSON was missing the expected \"breakdown\" array");
   return parsed;
@@ -1340,6 +1359,8 @@ const aiHealth = new Map();
 // actual entry point is the default export below, which never calls this.
 // Exists purely so tests can isolate scenarios from each other without
 // waiting out real cooldown timers (see tests/ai-reliability.test.mjs).
+export { loginArtResponse, computePupilSkillMinis, computeProgressSeries, redactForPupil, attentionReasons, computeAnalyticsExtras, skillsOfRounds, buildSkillWeb, computeSkillInsights, scaleBreakdownToScore };
+
 export function __resetAiHealthForTests() {
   aiHealth.clear();
 }
@@ -1569,7 +1590,9 @@ function normalizeAiResult(raw, markedBy) {
 }
 // Unit 2 (Questions 2 + 3 together): Experience 16 + Suggestion 2 + Language 7, out of 25.
 function normalizeAiResultUnit2(raw, markedBy) {
-  return normalizeWithSpec(raw, markedBy, UNIT2_NORMALIZE_SPEC);
+  const base = normalizeWithSpec(raw, markedBy, UNIT2_NORMALIZE_SPEC);
+  const r = raw && typeof raw === "object" ? raw : {};
+  return { ...base, ...parseModelAnswersUnit2(r), observed: normalizeObserved(r.observed) };
 }
 
 function buildPrompts(topic, question, mode, data, rubricText, opts) {
@@ -1601,7 +1624,7 @@ function buildPrompts(topic, question, mode, data, rubricText, opts) {
   const pupilWords = opts.pupilWords || 0;
   const targetWords = opts.targetWords || 0;
   const modelAnswerInstruction = targetWords
-    ? `Also write "modelAnswer": a rewritten, STRONGER version of the pupil's OWN Experience answer (or their combined answer if in single mode) that keeps their real content and experience but fixes grammar, adds the specific 5W1H detail their version was missing, and reads more fluently - this shows the pupil what a stronger version of THEIR OWN answer could sound like, not a generic unrelated example.
+    ? `Also write "modelAnswer": a rewritten, STRONGER version of the pupil's WHOLE answer (every box in the order Thought, Reason, Evidence, Experience, Suggestion, or the single combined answer) as one or two flowing paragraphs with no labels, that keeps their real content and experience but fixes grammar, adds the specific 5W1H detail their version was missing, and reads more fluently - this shows the pupil what a stronger version of THEIR OWN answer could sound like, not a generic unrelated example.
 LENGTH RULE for "modelAnswer" (important): the pupil's own answer is ${pupilWords} words long, so your rewrite MUST be at least ${targetWords} words - at least as many words as the original, ideally more. NEVER write a shorter or less detailed answer than the pupil's own. Every extra word must add real, specific detail the original lacked (exactly who was there, what happened, when, where, why, how it ended, and how they felt) - do not pad with repetition, waffle, or praise. Stay under about ${MODEL_ANSWER_CEILING_WORDS} words.`
     : `Also write "modelAnswer": since the pupil left their answer blank or nearly blank, write a short example answer (roughly 60-120 words) for this topic and question showing the kind of specific 5W1H personal experience that would score well.`;
 
@@ -1679,6 +1702,95 @@ ${content}`;
   return { system, user };
 }
 
+// ---------- v7.7: Unit 2 helpers (rewrites per answer, Present / Not observed) ----------
+function unit2ModelAnswerInstruction(opts) {
+  opts = opts || {};
+  const pwEach = Array.isArray(opts.pupilWordsEach) ? opts.pupilWordsEach : [0, 0];
+  const twEach = Array.isArray(opts.targetWordsEach) ? opts.targetWordsEach : [0, 0];
+  const anyTarget = twEach.some((t) => t > 0);
+  return anyTarget
+    ? `Also write "modelAnswers": an array of EXACTLY TWO strings - [0] is an improved version of the pupil's Question 2 answer, [1] is an improved version of the pupil's Question 3 answer. Each one keeps that answer's own real content (their experience, told in their own voice, first person) but fixes grammar, adds the specific 5W1H detail their version was missing, and reads more fluently, so the pupil can compare their own words with a stronger version side by side. Write each as one or two flowing paragraphs of plain prose (no labels such as Thought, Reason or Experience, even if the pupil's answer was split into labelled parts). Because Questions 2 and 3 are ONE story, keep the two rewrites continuous: a detail introduced in the Question 2 rewrite should be paid off in the Question 3 rewrite, and the Question 3 rewrite should land on a clear ending and a lesson or suggestion. Do not repeat the same sentences in both.
+LENGTH RULE for "modelAnswers" (important): the pupil's Question 2 answer is ${pwEach[0] || 0} words, so modelAnswers[0] MUST be at least ${twEach[0] || 0} words; the pupil's Question 3 answer is ${pwEach[1] || 0} words, so modelAnswers[1] MUST be at least ${twEach[1] || 0} words. NEVER write a shorter or less detailed version than the pupil's own. Every extra word must add real, specific detail the original lacked (who was there, what happened, when, where, why, how it ended, how they felt) - no padding, repetition or praise. Keep each under about ${UNIT2_MODEL_ANSWER_EACH_CEILING_WORDS} words. If a pupil answer is blank, return an empty string "" for that entry.`
+    : `Also write "modelAnswers": an array of EXACTLY TWO strings, since the pupil left their answers blank or nearly blank: [0] a short example answer (roughly 60-120 words) to Question 2 and [1] a short example answer (roughly 60-120 words) to Question 3, together telling one connected personal story with specific 5W1H detail.`;
+}
+
+function unit2RetryInstruction(lengthRetry) {
+  if (!lengthRetry) return "";
+  const short = lengthRetry.short || [];
+  return `
+
+SECOND ATTEMPT - ${short.map((x) => `YOUR "modelAnswers[${x.idx}]" (the Question ${x.idx + 2} rewrite) WAS TOO SHORT or missing: ${x.modelWords} words for a pupil answer of ${x.pupilWords} words`).join("; ")}. A shorter or thinner version than the pupil's own is unacceptable. Produce the full JSON again, and this time make ${short.map((x) => `modelAnswers[${x.idx}] at least ${x.targetWords} words`).join(" and ")}, longer and more specific than the pupil's original, expanding the 5W1H detail rather than repeating yourself.`;
+}
+
+// Parses the "modelAnswers" array from a provider reply: always exactly two
+// strings, each trimmed to its half of the doubled cap, "" when absent.
+function parseModelAnswersUnit2(raw) {
+  const r = raw && typeof raw === "object" ? raw : {};
+  const arr = Array.isArray(r.modelAnswers) ? r.modelAnswers : [];
+  const each = (v) => (typeof v === "string" && v.trim() ? trimModelAnswer(v, UNIT2_MODEL_ANSWER_EACH_MAX_CHARS) : "");
+  const modelAnswers = [each(arr[0]), each(arr[1])];
+  return { modelAnswers, modelAnswer: modelAnswers.filter(Boolean).join("\n\n") };
+}
+
+// "Present" / "Not observed" for Thought, Reason and Evidence. Information
+// only - never adds or removes a mark.
+function normalizeObserved(raw) {
+  const list = Array.isArray(raw) ? raw : [];
+  return OBSERVED_PARTS.map((part) => {
+    const found = list.find((o) => o && typeof o === "object" && String(o.part || "").trim().toLowerCase() === part.toLowerCase());
+    const text = found ? String(found.status || "").trim().toLowerCase() : "";
+    const status = /^not|absent|missing|no\b/.test(text) ? OBSERVED_ABSENT : /present|yes|observed|found/.test(text) ? OBSERVED_PRESENT : "";
+    return { part, status };
+  });
+}
+
+// Simple cue-word check used ONLY when the AI left a status out or the unit was
+// marked offline, so the pupil never sees a blank. Deliberately forgiving.
+const OBSERVED_CUES = {
+  Thought: /\b(i\s+(think|feel|believe|thought|agree|disagree|prefer)|in\s+my\s+(opinion|view)|to\s+me)\b/i,
+  Reason: /\b(because|since|so\s+that|that\s+is\s+why|that's\s+why|the\s+reason|as\s+a\s+result)\b/i,
+  Evidence: /\b(for\s+example|for\s+instance|such\s+as|like\s+when|one\s+time|once|e\.g\.|in\s+the\s+picture|i\s+can\s+see)\b/i,
+};
+function fillObserved(observed, text) {
+  const given = Array.isArray(observed) ? observed : [];
+  return OBSERVED_PARTS.map((part) => {
+    const g = given.find((o) => o && o.part === part);
+    if (g && (g.status === OBSERVED_PRESENT || g.status === OBSERVED_ABSENT)) return { part, status: g.status };
+    return { part, status: OBSERVED_CUES[part].test(text || "") ? OBSERVED_PRESENT : OBSERVED_ABSENT };
+  });
+}
+
+// Unit 2 length guard: each of the two rewrites must be at least as long as the
+// pupil's own matching answer. One bounded regenerate (same provider) for any
+// that are short or missing; whatever is still short afterwards is blanked, and
+// the page then says "AI suggested answer currently not available".
+async function ensureStrongerModelAnswersUnit2(result, attempt, makePrompts, pupilWordsEach, targetWordsEach, normalize) {
+  normalize = normalize || normalizeAiResultUnit2;
+  const current = Array.isArray(result.modelAnswers) ? [result.modelAnswers[0] || "", result.modelAnswers[1] || ""] : ["", ""];
+  const shortOnes = [];
+  for (let i = 0; i < 2; i++) {
+    const target = (targetWordsEach && targetWordsEach[i]) || 0;
+    if (!target) continue; // the pupil wrote nothing for that answer - nothing to compare against
+    const words = countWords(current[i]);
+    if (words < target) shortOnes.push({ idx: i, modelWords: words, pupilWords: (pupilWordsEach && pupilWordsEach[i]) || 0, targetWords: target });
+  }
+  if (!shortOnes.length) return result;
+  const merged = current.slice();
+  try {
+    await sleep(AI_ATTEMPT_PAUSE_MS);
+    const raw = await attempt.run(makePrompts(attempt.vision, { short: shortOnes }));
+    const retried = normalize(raw, attempt.markedBy || attempt.name);
+    for (const sh of shortOnes) {
+      const cand = (retried.modelAnswers && retried.modelAnswers[sh.idx]) || "";
+      if (countWords(cand) >= sh.targetWords) merged[sh.idx] = cand;
+    }
+  } catch (e) {
+    // the regenerate call failed outright - marks/feedback from the first reply are unaffected
+  }
+  for (const sh of shortOnes) if (countWords(merged[sh.idx]) < sh.targetWords) merged[sh.idx] = "";
+  return { ...result, modelAnswers: merged, modelAnswer: merged.filter(Boolean).join("\n\n") };
+}
+
 // Prompt for Unit 2: Questions 2 and 3 marked together as ONE extended
 // personal-narrative response. One AI call sees both questions and both
 // answers; the rubric drops Thought/Reason/Evidence and there is no picture
@@ -1699,19 +1811,11 @@ function buildPromptsUnit2(topic, questions, mode, answers, rubricText, opts) {
       ? `Filler-word check (already counted by the app, not your job to recount): the pupil's two answers together contain ${fillerStats.count} filler word(s) (um/uh/erm/like/you know, etc.) out of ${fillerStats.totalWords} total words (${Math.round(fillerStats.density * 100)}% filler density). Note this is only as reliable as the speech-to-text transcript, which sometimes smooths over disfluencies - use it as one signal, not the only one, when scoring Fluency & Delivery.`
       : `The transcript was too short to meaningfully measure filler-word density - use your own judgement on Fluency & Delivery from the text alone.`;
 
-  const pupilWords = opts.pupilWords || 0;
-  const targetWords = opts.targetWords || 0;
-  const modelAnswerInstruction = targetWords
-    ? `Also write "modelAnswer": ONE rewritten, STRONGER version of the pupil's OWN story across both answers (their Experience content, told as a single connected account) that keeps their real experience but fixes grammar, adds the specific 5W1H detail their version was missing, links the two answers into one clear sequence ending with a reflection, and reads more fluently - this shows the pupil what a stronger version of THEIR OWN story could sound like, not a generic unrelated example.
-LENGTH RULE for "modelAnswer" (important): the pupil's own Experience content across both answers is ${pupilWords} words long, so your rewrite MUST be at least ${targetWords} words - at least as many words as the original, ideally more. NEVER write a shorter or less detailed account than the pupil's own. Every extra word must add real, specific detail the original lacked (exactly who was there, what happened, when, where, why, how it ended, and how they felt) - do not pad with repetition, waffle, or praise. Stay under about ${UNIT2_MODEL_ANSWER_CEILING_WORDS} words.`
-    : `Also write "modelAnswer": since the pupil left their answers blank or nearly blank, write a short example account (roughly 80-160 words) responding to the two questions as one connected story, showing the kind of specific 5W1H personal experience that would score well.`;
-
-  const lengthRetry = opts.lengthRetry;
-  const retryInstruction = lengthRetry
-    ? `
-
-SECOND ATTEMPT - YOUR PREVIOUS "modelAnswer" WAS TOO SHORT: you returned a rewrite of only ${lengthRetry.modelWords} words for a pupil story of ${lengthRetry.pupilWords} words. That is a weaker account than the pupil's own, which is unacceptable. Produce the full JSON again, and this time make "modelAnswer" at least ${lengthRetry.targetWords} words, longer and more specific than the pupil's original, expanding the 5W1H detail rather than repeating yourself.`
-    : "";
+  // v7.7: TWO rewrites, one per pupil answer, shown beside the pupil's own words.
+  const twEach = Array.isArray(opts.targetWordsEach) ? opts.targetWordsEach : [0, 0];
+  const anyTarget = twEach.some((t) => t > 0);
+  const modelAnswerInstruction = unit2ModelAnswerInstruction(opts);
+  const retryInstruction = unit2RetryInstruction(opts.lengthRetry);
 
   const expSubRules = UNIT2_EXPERIENCE_SUB.map(([label, max]) => `${label} 0-${max}`).join(", ");
   const expSubJson = UNIT2_EXPERIENCE_SUB.map(([label, max]) => `        { "label": "${label}", "points": 0, "max": ${max} }`).join(",\n");
@@ -1728,6 +1832,7 @@ ${fillerInstruction}
 Be encouraging in tone, age-appropriate for a 9-12 year old. Read BOTH answers as one story: a detail raised in Question 2 and its payoff in Question 3 are credited together, and a point should not be marked down in one answer for something the pupil clearly delivers in the other. For the Experience part you MUST score and return the ${UNIT2_EXPERIENCE_SUB.length} sub-criteria (${expSubRules}) and their sum must equal the Experience "points" value (out of 16). Do not reward length alone anywhere - reward specific, believable, relevant detail, and do not credit the same detail twice just because it is repeated in both answers.
 If the Experience lacks depth (vague on who/what/when/where, or reads as generic/memorised), say so plainly in the Experience part's "note" - name what was actually missing (e.g. "unclear where and when this happened, and who else was there") - and give 1-2 concrete example experiences the pupil could have shared instead, related to the questions, in the "suggestion" field.
 Suggestion (0-2) only has to appear in EITHER answer - do not require it in both.
+"observed" is FOR INFORMATION ONLY and carries NO marks: for each of Thought (the pupil gives a clear opinion or viewpoint), Reason (the pupil explains why, e.g. with "because") and Evidence (the pupil gives a concrete example or supporting detail), state whether it is "Present" or "Not observed" anywhere in the two answers together. Judge from what the pupil actually said, not from which box it was typed in. Use exactly the words "Present" or "Not observed". Do NOT add marks for these, do NOT lower any mark because one is "Not observed", and do NOT mention a "Not observed" item as a weakness in the feedback.
 Language Use is separate from content and is ONE holistic judgement over the pupil's combined text from both answers: Grammar Accuracy (0-3) and Vocabulary Range & Appropriateness (0-3) from the pupil's actual sentences (not from how interesting their ideas are), and Fluency & Delivery (0-1) mainly from the filler-word signal above and general smoothness of the transcript.
 Give ONE concrete, actionable suggestion for improvement per weak part in that part's "note".
 ${modelAnswerInstruction}
@@ -1750,7 +1855,12 @@ ${expSubJson}
   "suggestion": "one concrete practical tip to improve their next personal story - if depth was lacking, include 1-2 example experiences they could share instead, max 40 words",
   "strengths": "one or two SPECIFIC things the pupil did well across the two answers, pointing to something they actually said, in pupil-friendly words, max 30 words",
   "nextStep": "exactly ONE concrete next step for their very next try, starting with a verb, specific to this story (e.g. which of who/when/where/why/how it ended, or the lesson, was missing), max 25 words",
-  "modelAnswer": ${targetWords ? `"one rewritten, stronger version of the pupil's own story across both answers - at least ${targetWords} words, never shorter than their original"` : `"a short example account, roughly 80-160 words"`}
+  "observed": [
+    { "part": "Thought", "status": "Present or Not observed" },
+    { "part": "Reason", "status": "Present or Not observed" },
+    { "part": "Evidence", "status": "Present or Not observed" }
+  ],
+  "modelAnswers": [${anyTarget ? `"improved version of the pupil's Question 2 answer - at least ${twEach[0] || 0} words", "improved version of the pupil's Question 3 answer - at least ${twEach[1] || 0} words"` : `"short example answer to Question 2", "short example answer to Question 3"`}]
 }${retryInstruction}`;
 
   const answerBlock = (a) =>
@@ -1815,7 +1925,7 @@ async function fetchImageAsBase64(url) {
 // tried in that order, so a second account's free-tier quota is available
 // if the first is exhausted or rate-limited. See aiScore for where both get
 // queued as separate attempts.
-async function callGroq(env, system, user, model, apiKey, signal) {
+async function callGroq(env, system, user, model, apiKey, signal, expect) {
   let resp;
   try {
     resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
@@ -1837,6 +1947,7 @@ async function callGroq(env, system, user, model, apiKey, signal) {
         response_format: { type: "json_object" },
         reasoning_effort: "low", // this task doesn't need heavy reasoning - keeps latency down
         temperature: 0.4,
+        max_completion_tokens: AI_MAX_OUTPUT_TOKENS,
       }),
       signal,
     });
@@ -1855,7 +1966,7 @@ async function callGroq(env, system, user, model, apiKey, signal) {
   }
   const text = choice && choice.message && choice.message.content;
   if (!text) throw new AiError(AI_ERROR.MALFORMED_RESPONSE, "groq: empty response");
-  return extractJson(text);
+  return extractJson(text, expect);
 }
 
 // ---------- Provider: Google Gemini (https://aistudio.google.com/apikey) ----------
@@ -1863,7 +1974,7 @@ async function callGroq(env, system, user, model, apiKey, signal) {
 // env.GEMINI_API_KEY_2 - tried in that order, same reasoning as Groq/
 // OpenRouter above: a second account's free-tier quota is available if the
 // first is exhausted or rate-limited.
-async function callGemini(env, system, user, image, apiKey, signal) {
+async function callGemini(env, system, user, image, apiKey, signal, expect) {
   const model = "gemini-2.5-flash"; // fast + cheap, generous free tier, multimodal
   const parts = [{ text: user }];
   if (image && image.base64) {
@@ -1882,6 +1993,7 @@ async function callGemini(env, system, user, image, apiKey, signal) {
           generationConfig: {
             responseMimeType: "application/json",
             temperature: 0.4,
+            maxOutputTokens: AI_MAX_OUTPUT_TOKENS + 2048, // Gemini counts any "thinking" tokens inside this limit
           },
         }),
         signal,
@@ -1907,11 +2019,11 @@ async function callGemini(env, system, user, image, apiKey, signal) {
   const respParts = candidate && candidate.content && candidate.content.parts;
   const text = respParts && respParts[0] && respParts[0].text;
   if (!text) throw new AiError(AI_ERROR.MALFORMED_RESPONSE, "gemini: empty response");
-  return extractJson(text);
+  return extractJson(text, expect);
 }
 
 // ---------- Provider: Cloudflare Workers AI (final AI-tier marker, free, built into this Worker) ----------
-async function callWorkersAI(env, system, user, signal) {
+async function callWorkersAI(env, system, user, signal, expect) {
   const model = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"; // confirmed active, not on Cloudflare's deprecation list as of Aug 2026
   let result;
   try {
@@ -1925,6 +2037,7 @@ async function callWorkersAI(env, system, user, signal) {
       ],
       response_format: { type: "json_object" },
       temperature: 0.4,
+      max_tokens: AI_MAX_OUTPUT_TOKENS,
     });
   } catch (e) {
     console.error("Workers AI call error", e && e.message);
@@ -1939,7 +2052,7 @@ async function callWorkersAI(env, system, user, signal) {
   }
   const text = typeof result === "string" ? result : result.response;
   if (!text) throw new AiError(AI_ERROR.MALFORMED_RESPONSE, "workers-ai: empty response");
-  return extractJson(text);
+  return extractJson(text, expect);
 }
 
 // ---------- Provider: OpenRouter (https://openrouter.ai) ----------
@@ -1947,7 +2060,7 @@ async function callWorkersAI(env, system, user, signal) {
 // env.OPENROUTER_API_KEY_2 - tried in that order, so a second account's
 // free-tier quota is available if the first is exhausted or rate-limited.
 // See aiScore for where both get queued as separate attempts.
-async function callOpenRouter(env, system, user, model, apiKey, signal) {
+async function callOpenRouter(env, system, user, model, apiKey, signal, expect) {
   let resp;
   try {
     resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -1971,6 +2084,7 @@ async function callOpenRouter(env, system, user, model, apiKey, signal) {
         ],
         response_format: { type: "json_object" },
         temperature: 0.4,
+        max_tokens: AI_MAX_OUTPUT_TOKENS,
       }),
       signal,
     });
@@ -1999,7 +2113,7 @@ async function callOpenRouter(env, system, user, model, apiKey, signal) {
   }
   const text = choice && choice.message && choice.message.content;
   if (!text) throw new AiError(AI_ERROR.MALFORMED_RESPONSE, "openrouter: empty response");
-  return extractJson(text);
+  return extractJson(text, expect);
 }
 
 // ---------- AI marking: 2x Gemini -> 2x Groq -> 2x OpenRouter -> Workers AI -> offline scorer ----------
@@ -2016,6 +2130,12 @@ async function callOpenRouter(env, system, user, model, apiKey, signal) {
 const AI_MARKING_MAX_PASSES = 2; // how many times to retry the *entire* chain for one question before giving up to the offline scorer
 const AI_ATTEMPT_PAUSE_MS = 350; // brief pause between individual provider attempts within a chain
 const AI_PASS_RETRY_PAUSE_MS = 3000; // longer pause before retrying the whole chain again (gives transient rate-limits time to clear)
+// v7.7: explicit output ceiling for every provider. The Unit 2 reply is now two
+// full rewrites (up to ~400 words each) plus the breakdown, which can overrun a
+// provider's small default (Workers AI defaults to 256 tokens) and arrive as
+// cut-off, unparseable JSON - which would silently push the submission down the
+// chain to the offline marker.
+const AI_MAX_OUTPUT_TOKENS = 6000;
 const AI_REQUEST_TIMEOUT_MS = 20_000; // per HTTP call - bounds how long one candidate can hang before we move on
 const AI_MAX_TOTAL_MS = 45_000; // wall-clock ceiling for the WHOLE marking attempt (all passes/candidates) before giving up to the offline scorer - prevents one slow/hanging provider from stalling a pupil's submission indefinitely
 const AI_INPLACE_BACKOFF_BASE_MS = 400; // base for the single in-place retry's exponential-backoff-with-jitter
@@ -2053,7 +2173,7 @@ function buildProviderRegistry(env, groqModel, openRouterModel, image) {
         {
           id: "gemini-2.5-flash",
           capabilities: { vision: true, json: true, maxContextTokens: 1_000_000 },
-          call: (p, apiKey, signal) => callGemini(env, p.system, p.user, image, apiKey, signal),
+          call: (p, apiKey, signal) => callGemini(env, p.system, p.user, image, apiKey, signal, p.expect),
           // Two API keys/accounts for the SAME model - not two different
           // providers, and not tried interchangeably with Groq or
           // OpenRouter's keys. A second Gemini account's free-tier quota
@@ -2072,7 +2192,7 @@ function buildProviderRegistry(env, groqModel, openRouterModel, image) {
         {
           id: groqModel,
           capabilities: { vision: false, json: true, maxContextTokens: 128_000 },
-          call: (p, apiKey, signal) => callGroq(env, p.system, p.user, groqModel, apiKey, signal),
+          call: (p, apiKey, signal) => callGroq(env, p.system, p.user, groqModel, apiKey, signal, p.expect),
           keys: [
             { id: "key1", apiKey: env.GROQ_API_KEY },
             { id: "key2", apiKey: env.GROQ_API_KEY_2 },
@@ -2090,7 +2210,7 @@ function buildProviderRegistry(env, groqModel, openRouterModel, image) {
           // are typically smaller than Gemini/Groq's - conservative estimate
           // used only for reordering on a CONTEXT_TOO_LONG error, not enforced.
           capabilities: { vision: false, json: true, maxContextTokens: 32_000 },
-          call: (p, apiKey, signal) => callOpenRouter(env, p.system, p.user, openRouterModel, apiKey, signal),
+          call: (p, apiKey, signal) => callOpenRouter(env, p.system, p.user, openRouterModel, apiKey, signal, p.expect),
           keys: [
             { id: "key1", apiKey: env.OPENROUTER_API_KEY },
             { id: "key2", apiKey: env.OPENROUTER_API_KEY_2 },
@@ -2105,7 +2225,7 @@ function buildProviderRegistry(env, groqModel, openRouterModel, image) {
         {
           id: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
           capabilities: { vision: false, json: true, maxContextTokens: 24_000 },
-          call: (p, apiKey, signal) => callWorkersAI(env, p.system, p.user, signal),
+          call: (p, apiKey, signal) => callWorkersAI(env, p.system, p.user, signal, p.expect),
           // Not an API key - env.AI is a binding, always the same "account".
           // apiKey:true just marks it configured; call() ignores the value.
           keys: [{ id: "binding", apiKey: env.AI ? true : null }],
@@ -2292,6 +2412,9 @@ async function runAiMarking(env, topic, plan) {
   // from what the pupil actually wrote rather than a fixed word count.
   const pupilWords = countWords(plan.pupilAnswer);
   const targetWords = modelAnswerTargetWords(pupilWords, plan.ceilingWords);
+  // Unit 2 compares each rewrite with the pupil's OWN matching answer.
+  const pupilWordsEach = (plan.pupilAnswers || []).map(countWords);
+  const targetWordsEach = pupilWordsEach.map((w) => modelAnswerTargetWords(w, plan.ceilingEachWords));
 
   // Prompts are rebuilt on demand rather than computed once, because the
   // one-time "your rewrite was too short" regenerate needs the same prompt
@@ -2303,6 +2426,8 @@ async function runAiMarking(env, topic, plan) {
       fillerStats,
       pupilWords,
       targetWords,
+      pupilWordsEach,
+      targetWordsEach,
       lengthRetry,
     });
   const visionPrompts = makePrompts(true, null);
@@ -2324,6 +2449,7 @@ async function runAiMarking(env, topic, plan) {
         const raw = await runProviderAttempt(candidate, promptsFor(candidate));
         const result = plan.normalize(raw, candidate.providerId);
         const attempt = { name: candidate.providerId, vision: candidate.capabilities.vision, run: (p) => runProviderAttempt(candidate, p) };
+        if (plan.finalize) return await plan.finalize(result, attempt, makePrompts, { pupilWordsEach, targetWordsEach });
         return await ensureStrongerModelAnswer(result, attempt, makePrompts, pupilWords, targetWords, plan.normalize);
       } catch (aiErr) {
         if (aiErr && aiErr.category === AI_ERROR.CONTEXT_TOO_LONG) preferLargeContext = true;
@@ -2354,7 +2480,7 @@ async function aiScore(env, topic, question, mode, data, opts) {
     defaultRubric: DEFAULT_RUBRIC,
     useImage: true,
     combinedText: combinedAnswerText(mode, data),
-    pupilAnswer: pupilAnswerForModelAnswer(mode, data),
+    pupilAnswer: combinedAnswerText(mode, data), // v7.7: the improved answer rewrites the WHOLE response (shown beside it as one paragraph)
     ceilingWords: MODEL_ANSWER_CEILING_WORDS,
     buildPrompts: (rubricText, o) => buildPrompts(topic, question, mode, data, rubricText, o),
     normalize: normalizeAiResult,
@@ -2366,19 +2492,144 @@ async function aiScore(env, topic, question, mode, data, opts) {
 // both answers. Experience 16 + Suggestion 2 + Language 7 = 25. No picture.
 async function aiScoreUnit2(env, topic, questions, mode, answers, opts) {
   const list = Array.isArray(answers) ? answers : [];
-  return runAiMarking(env, topic, {
+  const fullText = list.map((a) => combinedAnswerText(mode, a)).join(" ");
+  const result = await runAiMarking(env, topic, {
     rubricOverride: opts && opts.rubricOverride,
     rubricKey: "rubric_q2q3",
     defaultRubric: DEFAULT_RUBRIC_Q2Q3,
     useImage: false,
-    combinedText: list.map((a) => combinedAnswerText(mode, a)).join(" "),
-    pupilAnswer: pupilAnswerForModelAnswerUnit2(mode, list),
+    combinedText: fullText,
+    pupilAnswer: "",
     ceilingWords: UNIT2_MODEL_ANSWER_CEILING_WORDS,
+    pupilAnswers: list.map((a) => combinedAnswerText(mode, a)),
+    ceilingEachWords: UNIT2_MODEL_ANSWER_EACH_CEILING_WORDS,
     buildPrompts: (rubricText, o) => buildPromptsUnit2(topic, questions, mode, list, rubricText, o),
     normalize: normalizeAiResultUnit2,
+    finalize: (res, attempt, makePrompts, w) => ensureStrongerModelAnswersUnit2(res, attempt, makePrompts, w.pupilWordsEach, w.targetWordsEach, normalizeAiResultUnit2),
     fallback: (fillerStats) => ruleBasedScoreUnit2(mode, list, topic, fillerStats),
   });
+  // Present / Not observed is information only; never blank for the pupil.
+  return {
+    ...result,
+    observed: fillObserved(result.observed, fullText),
+    modelAnswers: Array.isArray(result.modelAnswers) ? result.modelAnswers : ["", ""],
+  };
 }
+
+// ---------- v7.7: "Retry AI suggested answer" (teacher button) ----------
+// Regenerates ONLY the improved answer(s) for one already-marked round. It never
+// touches the score, breakdown, feedback or markedBy - those stay exactly as
+// they were - so it is safe to use on a round whose marking worked but whose
+// improved answer came back too short, or on an offline-marked round.
+function buildModelOnlyPromptsUnit2(topic, questions, mode, answers, opts) {
+  opts = opts || {};
+  const qs = Array.isArray(questions) ? questions : [];
+  const ans = Array.isArray(answers) ? answers : [];
+  const system = `You are a supportive Primary School English oral examiner in Singapore. A pupil (aged 9-12) answered TWO linked spoken questions (Question 2 and Question 3) that together read as ONE personal story. You are NOT marking anything now: only write the improved versions of the pupil's two answers for them to compare with their own.
+
+${unit2ModelAnswerInstruction(opts)}
+
+Respond with ONLY valid JSON, no markdown fences, no preamble, matching exactly this shape:
+{ "modelAnswers": ["improved version of the Question 2 answer", "improved version of the Question 3 answer"] }${unit2RetryInstruction(opts.lengthRetry)}`;
+  const answerText = (a) => (mode === "single" ? ((a && a.text) || "").trim() : TREES_ORDER.map(([key, label]) => (((a && a.parts && a.parts[key]) || "").trim() ? `${label}: ${a.parts[key].trim()}` : "")).filter(Boolean).join("\n")) || "(left blank)";
+  const user = `Topic: ${topic ? topic.title : "General"}
+
+Question 2: ${qs[0] || "Tell me more about this topic."}
+Pupil's answer to Question 2:
+${answerText(ans[0])}
+
+Question 3: ${qs[1] || "Tell me more about this topic."}
+Pupil's answer to Question 3:
+${answerText(ans[1])}`;
+  return { system, user, expect: "model" };
+}
+
+function buildModelOnlyPromptsQ1(topic, question, mode, data, opts) {
+  opts = opts || {};
+  const pupilWords = opts.pupilWords || 0;
+  const targetWords = opts.targetWords || 0;
+  const imageDescription = (opts.imageDescription || "").trim();
+  const retry = opts.lengthRetry;
+  const system = `You are a supportive Primary School English oral examiner in Singapore. A pupil (aged 9-12) gave a spoken answer about a picture. You are NOT marking anything now: only write an improved version of the pupil's WHOLE answer (all of it, as one flowing paragraph or two, with no labels) for them to compare with their own. Keep their real content and experience, fix grammar, add the specific detail their version was missing (a clear thought, a reason, something from the picture, a specific personal experience with who/what/when/where/why/how it ended, and a suggestion), and make it read more fluently.${imageDescription ? ` The teacher describes the picture as: "${imageDescription}".` : ""}
+${targetWords ? `LENGTH RULE (important): the pupil's own answer is ${pupilWords} words long, so your rewrite MUST be at least ${targetWords} words - never shorter or less detailed than the pupil's own. Every extra word must add real, specific detail - no padding. Stay under about ${MODEL_ANSWER_CEILING_WORDS} words.` : "The pupil left the answer blank or nearly blank: write a short example answer (roughly 60-120 words) showing what a strong answer would sound like."}
+Respond with ONLY valid JSON, no markdown fences, matching exactly: { "modelAnswer": "the improved version" }${retry ? `
+
+SECOND ATTEMPT - your previous rewrite was only ${retry.modelWords} words for a pupil answer of ${retry.pupilWords} words, which is too short. Make it at least ${retry.targetWords} words, more specific than the pupil's original.` : ""}`;
+  const answerText = mode === "single" ? ((data && data.text) || "").trim() : TREES_ORDER.map(([key, label]) => (((data && data.parts && data.parts[key]) || "").trim() ? `${label}: ${data.parts[key].trim()}` : "")).filter(Boolean).join("\n");
+  const user = `Topic: ${topic ? topic.title : "General"}
+Question: ${question || "Tell me about the picture."}
+Pupil's answer:
+${answerText || "(left blank)"}`;
+  return { system, user, expect: "model" };
+}
+
+function normalizeModelOnlyUnit2(raw, markedBy) {
+  return { ...parseModelAnswersUnit2(raw), markedBy };
+}
+function normalizeModelOnlyQ1(raw, markedBy) {
+  const r = raw && typeof raw === "object" ? raw : {};
+  return { modelAnswer: typeof r.modelAnswer === "string" && r.modelAnswer.trim() ? trimModelAnswer(r.modelAnswer) : "", markedBy };
+}
+
+async function aiModelAnswersOnly(env, topic, round, mode) {
+  if (roundUnit(round) === UNIT_Q2Q3) {
+    const list = Array.isArray(round.answers) ? round.answers : [];
+    return runAiMarking(env, topic, {
+      rubricKey: "rubric_q2q3",
+      defaultRubric: "",
+      useImage: false,
+      combinedText: list.map((a) => combinedAnswerText(mode, a)).join(" "),
+      pupilAnswer: "",
+      ceilingWords: UNIT2_MODEL_ANSWER_CEILING_WORDS,
+      pupilAnswers: list.map((a) => combinedAnswerText(mode, a)),
+      ceilingEachWords: UNIT2_MODEL_ANSWER_EACH_CEILING_WORDS,
+      buildPrompts: (_rubric, o) => buildModelOnlyPromptsUnit2(topic, round.questions || [], mode, list, o),
+      normalize: normalizeModelOnlyUnit2,
+      finalize: (result, attempt, makePrompts, w) => ensureStrongerModelAnswersUnit2(result, attempt, makePrompts, w.pupilWordsEach, w.targetWordsEach, normalizeModelOnlyUnit2),
+      fallback: () => ({ modelAnswers: ["", ""], modelAnswer: "" }),
+    });
+  }
+  return runAiMarking(env, topic, {
+    rubricKey: "rubric",
+    defaultRubric: "",
+    useImage: false,
+    combinedText: combinedAnswerText(mode, round.answer),
+    pupilAnswer: combinedAnswerText(mode, round.answer),
+    ceilingWords: MODEL_ANSWER_CEILING_WORDS,
+    buildPrompts: (_rubric, o) => buildModelOnlyPromptsQ1(topic, round.question, mode, round.answer, o),
+    normalize: normalizeModelOnlyQ1,
+    fallback: () => ({ modelAnswer: "" }),
+  });
+}
+
+async function retryRoundModelAnswers(env, row, roundIndex) {
+  const rounds = JSON.parse(row.rounds || "[]");
+  const target = rounds[roundIndex];
+  if (!target) return { ok: false, error: "That question doesn't exist on this submission." };
+  const topicRow = await env.CCv6_DB.prepare("SELECT * FROM topics WHERE id = ?").bind(row.topic_id).first();
+  const topic = topicRow
+    ? { id: topicRow.id, title: topicRow.title, imageUrl: topicRow.image_url, imageDescription: topicRow.image_description }
+    : { id: row.topic_id, title: row.topic_title, imageUrl: "", imageDescription: "" };
+
+  const result = await aiModelAnswersOnly(env, topic, target, row.mode);
+  const unavailable = { ok: true, success: false, submission: rowToSubmission(row), message: "The AI is currently not available. Please try again in a few minutes." };
+  if (result.markedBy === "fallback") return unavailable;
+
+  let updated;
+  if (roundUnit(target) === UNIT_Q2Q3) {
+    const existing = Array.isArray(target.modelAnswers) ? target.modelAnswers : ["", ""];
+    const merged = [result.modelAnswers[0] || existing[0] || "", result.modelAnswers[1] || existing[1] || ""];
+    if (!result.modelAnswers[0] && !result.modelAnswers[1]) return unavailable;
+    updated = { ...target, modelAnswers: merged, modelAnswer: merged.filter(Boolean).join("\n\n") };
+  } else {
+    if (!result.modelAnswer) return unavailable;
+    updated = { ...target, modelAnswer: result.modelAnswer };
+  }
+  rounds[roundIndex] = updated;
+  await env.CCv6_DB.prepare("UPDATE submissions SET rounds = ? WHERE id = ?").bind(JSON.stringify(rounds), row.id).run();
+  return { ok: true, success: true, submission: rowToSubmission({ ...row, rounds: JSON.stringify(rounds) }) };
+}
+
 
 
 // ---------- Submissions: scope + filter + sort (D1) ----------
@@ -2388,6 +2639,7 @@ async function aiScoreUnit2(env, topic, questions, mode, answers, opts) {
 // scoped teacher-admin's WHERE clause is built from their assignedClasses,
 // so out-of-scope rows are never even read out of D1.
 function rowToSubmission(row) {
+  const rounds = JSON.parse(row.rounds || "[]");
   return {
     id: row.id,
     pupilName: row.pupil_name,
@@ -2395,7 +2647,10 @@ function rowToSubmission(row) {
     topicId: row.topic_id,
     topicTitle: row.topic_title,
     mode: row.mode,
-    rounds: JSON.parse(row.rounds || "[]"),
+    rounds,
+    // v7.10: this attempt's skill marks, derived from rounds on every read (so a re-mark or an
+    // override is reflected immediately). Pupils get it only for their own entries - see redactForPupil.
+    skills: skillsOfRounds(rounds),
     finalScore: row.final_score,
     maxScore: row.max_score,
     flagged: !!row.flagged,
@@ -2406,6 +2661,10 @@ function rowToSubmission(row) {
     retryOf: row.retry_of || null,
     leaderboardCounted: !!row.leaderboard_counted,
     createdAt: row.created_at,
+    // v7.9 (columns exist only after migrations/v7_9.sql; absent -> null)
+    teacherComment: row.teacher_comment ? { text: row.teacher_comment, by: row.comment_by || "", at: row.comment_at || null } : null,
+    reviewedAt: row.reviewed_at || null,
+    reviewedBy: row.reviewed_by || null,
   };
 }
 
@@ -2437,15 +2696,32 @@ function stripCoachUsedForPupil(submission) {
 // payload: POST /api/submit, /api/submissions/mine, /api/submissions/leaderboard
 // and the pupil's own /remark response. Pre-v7.5 (3-round) submissions are
 // redacted the same way.
-function redactForPupil(submission) {
-  const base = stripCoachUsedForPupil(submission);
+function redactForPupil(submission, isOwner) {
+  const stripped = stripCoachUsedForPupil(submission);
+  // v7.9: the review tick is a teacher's private to-do marker. The teacher's note
+  // to a pupil is the pupil's OWN to read (text + date, not who wrote it); a
+  // classmate never gets it.
+  const { teacherComment, reviewedAt, reviewedBy, skills: _skills, ...base } = stripped;
   return {
     ...base,
+    // v7.10: skill marks are marks, so like the breakdown they go to the owner only
+    ...(isOwner ? { skills: skillsOfRounds(base.rounds) } : {}),
+    ...(isOwner && teacherComment ? { teacherComment: { text: teacherComment.text, at: teacherComment.at } } : {}),
     rounds: base.rounds.map((r) => {
-      const { score, max, breakdown, originalScore, overriddenBy, overriddenAt, ...rest } = r;
-      return rest;
+      // Teacher-only in every case: who adjusted a score, when, and what it was before.
+      const { originalScore, overriddenBy, overriddenAt, ...own } = r;
+      if (isOwner) return own; // v7.7: the pupil's OWN entry keeps score, max, breakdown and observed
+      const { score, max, breakdown, observed, ...peer } = own; // classmates see answers + feedback, never marks
+      return peer;
     }),
   };
+}
+// Same match the pupil's own history query uses (name + class, case-insensitive).
+function isOwnSubmission(session, submission) {
+  return (
+    String(submission.pupilName || "").toLowerCase() === String(session.name || "").toLowerCase() &&
+    String(submission.pupilClass || "unassigned").toLowerCase() === String(session.pupilClass || "unassigned").toLowerCase()
+  );
 }
 
 // v7.6 - class insights, from stored rounds only. v7.5+ rows split cleanly by
@@ -2514,6 +2790,645 @@ function computeAnalytics(rows) {
       .map((c) => ({ pupilClass: c.pupilClass, n: c.n, avgFinal: Math.round((c.sum / c.n) * 10) / 10 }))
       .sort((a, b) => a.pupilClass.localeCompare(b.pupilClass)),
   };
+}
+
+// ====================================================================
+// v7.10 - SKILL WEB
+// ====================================================================
+// The "character skill web" is computed fresh from the stored `rounds` JSON every
+// time it is asked for (pupil My Progress, a result screen, the teacher's pupil
+// report, class Insights). Nothing is cached or stored, so an AI re-mark or a
+// teacher score override shows up the next time the web is built - there is no
+// separate number to keep in step.
+//
+// Eight skills = the eight parts the marker actually assesses. Experience can be
+// opened up into its sub-skills (Relevance, 5W1H ... Depth).
+//   Thought / Reason / Evidence: marked in Question 1 only (Unit 2 records them as
+//   Present / Not observed with no marks). Suggestion, Experience and the three
+//   Language parts are marked in both units, so they are pooled as points / max.
+const SKILL_AXES = [
+  { key: "Thought", label: "Thought" },
+  { key: "Reason", label: "Reason" },
+  { key: "Evidence", label: "Evidence" },
+  { key: "Experience", label: "Experience" },
+  { key: "Suggestion", label: "Suggestion" },
+  { key: "Grammar", label: "Grammar" },
+  { key: "Vocabulary", label: "Vocabulary" },
+  { key: "Fluency", label: "Fluency" },
+];
+const SKILL_SUB_ORDER = [
+  "Relevance",
+  "5W1H Specificity",
+  "Authenticity / Personal Voice",
+  "Clarity & Sequence",
+  "Reflection / Lesson Learnt",
+  "Depth & Development Across Both Answers",
+];
+const SKILL_WEB_WINDOW = 5; // the web shows the last 5 usable attempts; the 5 before that are the "earlier" outline
+
+function skillKeyForPart(part) {
+  const p = String(part || "").trim().toLowerCase();
+  if (p.startsWith("thought")) return "Thought";
+  if (p.startsWith("reason")) return "Reason";
+  if (p.startsWith("evidence")) return "Evidence";
+  if (p.startsWith("experience")) return "Experience";
+  if (p.startsWith("suggestion")) return "Suggestion";
+  if (p.startsWith("grammar")) return "Grammar";
+  if (p.startsWith("vocab")) return "Vocabulary";
+  if (p.startsWith("fluency")) return "Fluency";
+  return null;
+}
+
+const round2 = (n) => Math.round(n * 100) / 100;
+
+// Spread a teacher's overridden unit score back over the criteria. The teacher sets ONE
+// number for the unit, so the shape inside the unit is the marker's own shape scaled up
+// or down to that number (criteria never exceed their maximum; any overflow is handed
+// to the criteria that still have room). If the stored breakdown is all zeros the score
+// is shared out in proportion to each criterion's maximum.
+function scaleBreakdownToScore(breakdown, target) {
+  const items = (Array.isArray(breakdown) ? breakdown : [])
+    .filter((b) => b && Number(b.max) > 0)
+    .map((b) => ({ b, max: Number(b.max), pts: Math.max(0, Math.min(Number(b.max), Number(b.points) || 0)) }));
+  if (!items.length) return [];
+  const maxSum = items.reduce((s, i) => s + i.max, 0);
+  const t = Math.max(0, Math.min(maxSum, Number(target) || 0));
+  const curSum = items.reduce((s, i) => s + i.pts, 0);
+  let out = curSum > 0 ? items.map((i) => (i.pts * t) / curSum) : items.map((i) => (t * i.max) / maxSum);
+  for (let iter = 0; iter < 8; iter++) {
+    let over = 0;
+    out = out.map((p, i) => {
+      if (p > items[i].max) {
+        over += p - items[i].max;
+        return items[i].max;
+      }
+      return p;
+    });
+    if (over <= 1e-9) break;
+    const room = out.map((p, i) => items[i].max - p);
+    const roomSum = room.reduce((s, r) => s + r, 0);
+    if (roomSum <= 1e-9) break;
+    out = out.map((p, i) => p + (over * room[i]) / roomSum);
+  }
+  return items.map((it, i) => {
+    const newPts = out[i];
+    const sub = Array.isArray(it.b.subBreakdown)
+      ? it.b.subBreakdown.map((s) => {
+          const sMax = Number(s && s.max) || 0;
+          const sPts = Number(s && s.points) || 0;
+          const scaled = it.pts > 0 ? (sPts * newPts) / it.pts : (newPts * sMax) / it.max;
+          return { ...s, points: round2(Math.max(0, Math.min(sMax, scaled))) };
+        })
+      : undefined;
+    return { ...it.b, points: round2(newPts), adjusted: true, ...(sub ? { subBreakdown: sub } : {}) };
+  });
+}
+
+// A round counts toward the web once a real AI marked it, or a teacher marked it (override).
+// A round still carrying only the offline estimate is left out until then.
+function roundSkillEligible(r) {
+  return !!r && (r.markedBy !== "fallback" || !!r.overridden);
+}
+// The breakdown to read skills from. After a teacher override the unit score is the
+// teacher's number, so the criteria are scaled to it; otherwise the stored breakdown as is.
+function effectiveBreakdown(r) {
+  const bd = Array.isArray(r && r.breakdown) ? r.breakdown : [];
+  if (r && r.overridden && Number.isFinite(r.score)) {
+    const sum = bd.reduce((s, b) => s + (b && Number(b.max) > 0 ? Number(b.points) || 0 : 0), 0);
+    if (Math.abs(sum - r.score) > 0.05) return scaleBreakdownToScore(bd, r.score);
+  }
+  return bd;
+}
+
+// One attempt's skills: points / max per skill (and per Experience sub-skill), plus how many
+// rounds were used and how many were left out as still offline-estimated.
+function skillsOfRounds(rounds) {
+  const axes = {};
+  const sub = {};
+  let used = 0;
+  let excluded = 0;
+  let staffMarked = 0;
+  let adjusted = false;
+  const list = Array.isArray(rounds) ? rounds : [];
+  for (const r of list) {
+    if (!r) continue;
+    if (!roundSkillEligible(r)) {
+      excluded++;
+      continue;
+    }
+    let any = false;
+    for (const b of effectiveBreakdown(r)) {
+      if (!b || !(Number(b.max) > 0)) continue;
+      const key = skillKeyForPart(b.part);
+      if (!key) continue;
+      const a = axes[key] || (axes[key] = { points: 0, max: 0 });
+      a.points = round2(a.points + (Number(b.points) || 0));
+      a.max = round2(a.max + Number(b.max));
+      if (key === "Experience" && Array.isArray(b.subBreakdown)) {
+        for (const s of b.subBreakdown) {
+          if (!s || typeof s.label !== "string" || !(Number(s.max) > 0)) continue;
+          const t = sub[s.label] || (sub[s.label] = { points: 0, max: 0 });
+          t.points = round2(t.points + (Number(s.points) || 0));
+          t.max = round2(t.max + Number(s.max));
+        }
+      }
+      if (b.adjusted) adjusted = true;
+      any = true;
+    }
+    if (any) {
+      used++;
+      if (r.markedBy === "fallback" && r.overridden) staffMarked++;
+    }
+  }
+  return { axes, sub, used, excluded, staffMarked, adjusted, total: list.length };
+}
+
+function mergeSkills(list) {
+  const axes = {};
+  const sub = {};
+  let used = 0;
+  let excluded = 0;
+  let staffMarked = 0;
+  let adjusted = false;
+  for (const s of list) {
+    if (!s) continue;
+    used += s.used || 0;
+    excluded += s.excluded || 0;
+    staffMarked += s.staffMarked || 0;
+    if (s.adjusted) adjusted = true;
+    for (const [k, v] of Object.entries(s.axes || {})) {
+      const a = axes[k] || (axes[k] = { points: 0, max: 0 });
+      a.points += v.points;
+      a.max += v.max;
+    }
+    for (const [k, v] of Object.entries(s.sub || {})) {
+      const a = sub[k] || (sub[k] = { points: 0, max: 0 });
+      a.points += v.points;
+      a.max += v.max;
+    }
+  }
+  return { axes, sub, used, excluded, staffMarked, adjusted };
+}
+
+const pctOf = (v) => (v && v.max > 0 ? Math.round((v.points / v.max) * 100) : null);
+function axesToPcts(merged) {
+  return SKILL_AXES.map((ax) => ({ key: ax.key, label: ax.label, pct: pctOf(merged && merged.axes[ax.key]) }));
+}
+function subToPcts(merged, prevMerged) {
+  const labels = SKILL_SUB_ORDER.filter((l) => merged.sub[l] || (prevMerged && prevMerged.sub[l]));
+  for (const l of Object.keys(merged.sub)) if (!labels.includes(l)) labels.push(l);
+  return labels.map((l) => ({ label: l, pct: pctOf(merged.sub[l]), prevPct: prevMerged ? pctOf(prevMerged.sub[l]) : null }));
+}
+
+// Which attempts feed a pupil's web: non-practice attempts that have at least one usable round
+// (practice ones too when asked; practice-only when that is all there is).
+function skillPool(entries, includePractice) {
+  const usable = (e) => e.skills && e.skills.used > 0;
+  let pool = entries.filter((e) => usable(e) && (includePractice || !e.practice));
+  let practiceOnly = false;
+  if (!includePractice && pool.length === 0) {
+    pool = entries.filter(usable);
+    practiceOnly = pool.length > 0;
+  }
+  return { pool, practiceOnly };
+}
+
+// entries: oldest first, each with .skills (skillsOfRounds) and .practice.
+function buildSkillWeb(entries, includePractice, win) {
+  const w = win || SKILL_WEB_WINDOW;
+  const { pool, practiceOnly } = skillPool(entries, includePractice);
+  const cur = pool.slice(-w);
+  const prev = pool.length > w ? pool.slice(-2 * w, -w) : [];
+  const mc = mergeSkills(cur.map((e) => e.skills));
+  const mp = prev.length ? mergeSkills(prev.map((e) => e.skills)) : null;
+  const curAxes = axesToPcts(mc);
+  const prevAxes = mp ? axesToPcts(mp) : null;
+  const axes = curAxes.map((a, i) => {
+    const prevPct = prevAxes ? prevAxes[i].pct : null;
+    return { key: a.key, label: a.label, pct: a.pct, prevPct, delta: a.pct !== null && prevPct !== null ? a.pct - prevPct : null };
+  });
+  // "parts left out" is counted over the most recent attempts being considered (usable or not)
+  const considered = entries.filter((e) => includePractice || practiceOnly || !e.practice).slice(-w);
+  const excludedRounds = considered.reduce((s, e) => s + ((e.skills && e.skills.excluded) || 0), 0);
+  return {
+    window: w,
+    n: cur.length,
+    nPrev: prev.length,
+    practiceOnly,
+    axes,
+    sub: cur.length ? subToPcts(mc, mp) : [],
+    excludedRounds,
+    staffMarked: mc.staffMarked,
+    adjusted: mc.adjusted,
+  };
+}
+
+// Teacher's pupil report: latest window, first window (only when it differs), class average.
+function buildSkillReport(entries, classRows) {
+  const w = SKILL_WEB_WINDOW;
+  const { pool, practiceOnly } = skillPool(entries, false);
+  const latest = buildSkillWeb(entries, false, w);
+  let first = null;
+  if (pool.length > w) {
+    const mf = mergeSkills(pool.slice(0, w).map((e) => e.skills));
+    first = { n: Math.min(w, pool.length), axes: axesToPcts(mf) };
+  }
+  let classAvg = null;
+  if (Array.isArray(classRows) && classRows.length) {
+    const parts = [];
+    for (const row of classRows) {
+      let rounds;
+      try {
+        rounds = JSON.parse(row.rounds || "[]");
+      } catch (e) {
+        continue;
+      }
+      const sk = skillsOfRounds(rounds);
+      if (sk.used > 0) parts.push(sk);
+    }
+    if (parts.length) classAvg = { n: parts.length, axes: axesToPcts(mergeSkills(parts)) };
+  }
+  return { window: w, practiceOnly, latest, first, classAvg };
+}
+
+// v8.0: one small skill shape per pupil for the teacher's Pupils list. Same rules as the web
+// (non-practice, parts marked by an AI or a teacher, last 5 usable attempts), built from the rows.
+function computePupilSkillMinis(rows) {
+  const groups = new Map();
+  for (const row of rows || []) {
+    let rounds;
+    try {
+      rounds = JSON.parse(row.rounds || "[]");
+    } catch (e) {
+      continue;
+    }
+    const cls = row.pupil_class || "unassigned";
+    const key = String(row.pupil_name || "").toLowerCase() + "|" + String(cls).toLowerCase();
+    let g = groups.get(key);
+    if (!g) {
+      g = { name: row.pupil_name, pupilClass: cls, entries: [] };
+      groups.set(key, g);
+    }
+    g.entries.push({ createdAt: row.created_at, practice: false, skills: skillsOfRounds(rounds) });
+  }
+  const out = [];
+  for (const g of groups.values()) {
+    g.entries.sort((a, b) => a.createdAt - b.createdAt);
+    const { pool } = skillPool(g.entries, false);
+    const cur = pool.slice(-SKILL_WEB_WINDOW);
+    out.push({ name: g.name, pupilClass: g.pupilClass, n: cur.length, pcts: cur.length ? axesToPcts(mergeSkills(cur.map((e) => e.skills))).map((a) => a.pct) : SKILL_AXES.map(() => null) });
+  }
+  return out;
+}
+
+// Class Insights: overall + per class + per topic, from the filtered rows (any attempt whose
+// parts are AI- or teacher-marked contributes the parts that qualify).
+function computeSkillInsights(rows) {
+  const overall = [];
+  const byClass = {};
+  const byTopic = {};
+  let n = 0;
+  let excludedRounds = 0;
+  for (const row of rows || []) {
+    let rounds;
+    try {
+      rounds = JSON.parse(row.rounds || "[]");
+    } catch (e) {
+      continue;
+    }
+    const sk = skillsOfRounds(rounds);
+    excludedRounds += sk.excluded;
+    if (sk.used === 0) continue;
+    n++;
+    overall.push(sk);
+    const cls = row.pupil_class || "unassigned";
+    const title = row.topic_title || "(untitled)";
+    (byClass[cls] = byClass[cls] || []).push(sk);
+    (byTopic[title] = byTopic[title] || []).push(sk);
+  }
+  const mo = mergeSkills(overall);
+  const group = (map, nameKey) =>
+    Object.entries(map)
+      .map(([name, list]) => ({ [nameKey]: name, n: list.length, axes: axesToPcts(mergeSkills(list)) }))
+      .sort((a, b) => b.n - a.n || String(a[nameKey]).localeCompare(String(b[nameKey])))
+      .slice(0, 12);
+  return {
+    n,
+    excludedRounds,
+    overall: axesToPcts(mo),
+    sub: n ? subToPcts(mo, null).map((s) => ({ label: s.label, pct: s.pct })) : [],
+    byClass: group(byClass, "pupilClass"),
+    byTopic: group(byTopic, "topic"),
+  };
+}
+
+// v7.8 - one pupil's progress over time, from their own stored rows. Shared by
+// the pupil's My Progress tab (GET /api/pupil/progress) and, in v7.9, the
+// teacher's pupil report. Takes D1 rows in ANY order and returns them oldest
+// first. Handles both shapes of `rounds` (v7.5+ two tagged units, and older
+// untagged 3-round entries) by only ever dividing by what is actually there.
+// Percentages (not raw marks) are used for the aggregate because the maximum
+// for a criterion differs between old and v7.5+ attempts.
+function computeProgressSeries(rows) {
+  const entries = [];
+  for (const row of rows || []) {
+    let rounds;
+    try {
+      rounds = JSON.parse(row.rounds || "[]");
+    } catch (e) {
+      continue;
+    }
+    if (!Array.isArray(rounds)) continue;
+    const criteria = [];
+    const units = [];
+    for (const r of rounds) {
+      if (!r) continue;
+      units.push({ score: Number.isFinite(r.score) ? r.score : 0, max: Number.isFinite(r.max) ? r.max : 0 });
+      // v7.10: parts still marked only by the offline estimate are left out of the strongest /
+      // weakest figures too (until an AI re-marks them or a teacher marks them), so these agree
+      // with the skill web. After a teacher override the criteria follow the teacher's score.
+      if (!roundSkillEligible(r)) continue;
+      for (const b of effectiveBreakdown(r)) {
+        if (!b || typeof b.part !== "string") continue;
+        criteria.push({ part: b.part, points: Number(b.points) || 0, max: Number(b.max) || 0 });
+      }
+    }
+    entries.push({
+      id: row.id,
+      createdAt: row.created_at,
+      topicId: row.topic_id,
+      topicTitle: row.topic_title,
+      finalScore: row.final_score,
+      maxScore: row.max_score,
+      practice: !!row.practice,
+      retryOf: row.retry_of || null,
+      units,
+      criteria,
+      skills: skillsOfRounds(rounds),
+    });
+  }
+  entries.sort((a, b) => a.createdAt - b.createdAt);
+
+  // Personal best: highest score as a share of its maximum (non-practice first,
+  // practice only counts if there is nothing else).
+  const pct = (e) => (e.maxScore > 0 ? e.finalScore / e.maxScore : 0);
+  const real = entries.filter((e) => !e.practice);
+  const bestPool = real.length ? real : entries;
+  let best = null;
+  for (const e of bestPool) if (!best || pct(e) > pct(best)) best = e;
+
+  // Strongest / weakest criteria across every attempt (percentage of marks).
+  const agg = {};
+  for (const e of entries) {
+    for (const c of e.criteria) {
+      if (!(c.max > 0)) continue;
+      if (!agg[c.part]) agg[c.part] = { part: c.part, points: 0, max: 0, n: 0 };
+      agg[c.part].points += c.points;
+      agg[c.part].max += c.max;
+      agg[c.part].n++;
+    }
+  }
+  const crit = Object.values(agg).map((c) => ({ part: c.part, pct: Math.round((c.points / c.max) * 100), n: c.n }));
+  crit.sort((a, b) => b.pct - a.pct);
+  const strongest = crit.length ? crit[0] : null;
+  const weakest = crit.length > 1 ? crit[crit.length - 1] : null;
+
+  // Most improved: the largest gain, as a share of the maximum, between two
+  // attempts at the SAME topic (a later attempt vs an earlier one).
+  let mostImproved = null;
+  const byTopic = {};
+  for (const e of entries) {
+    const k = String(e.topicId || e.topicTitle || "");
+    (byTopic[k] = byTopic[k] || []).push(e);
+  }
+  for (const list of Object.values(byTopic)) {
+    for (let j = 1; j < list.length; j++) {
+      for (let i = 0; i < j; i++) {
+        const gain = pct(list[j]) - pct(list[i]);
+        if (gain > 0 && (!mostImproved || gain > mostImproved.gainPct / 100)) {
+          mostImproved = {
+            topicTitle: list[j].topicTitle,
+            from: list[i].finalScore,
+            to: list[j].finalScore,
+            max: list[j].maxScore,
+            gain: Math.round((list[j].finalScore - list[i].finalScore) * 10) / 10,
+            gainPct: Math.round(gain * 100),
+          };
+        }
+      }
+    }
+  }
+  return {
+    entries,
+    summary: {
+      attempts: entries.length,
+      best: best ? { id: best.id, topicTitle: best.topicTitle, finalScore: best.finalScore, maxScore: best.maxScore, practice: best.practice } : null,
+      strongest,
+      weakest,
+      criteria: crit,
+      mostImproved,
+      skillWeb: buildSkillWeb(entries, false),
+      skillWebAll: buildSkillWeb(entries, true),
+    },
+  };
+}
+
+// ====================================================================
+// v7.9 - TEACHER END helpers
+// ====================================================================
+const V79_MIGRATION_MESSAGE =
+  "This feature needs the v7.9 database update (one small SQL file). In Cloudflare open Workers & Pages > D1 > your database > Console, paste in the contents of migrations/v7_9.sql, run it, then try again.";
+
+// The new columns only exist after migrations/v7_9.sql has been run. Every v7.9
+// feature that touches them asks here first, so a Worker deployed BEFORE the
+// migration keeps working (and says what to do) instead of crashing. A positive
+// answer is remembered; a negative one is re-checked after 20 seconds, so running
+// the migration takes effect without a redeploy.
+const v79Probe = new WeakMap();
+async function hasV79Columns(env, kind) {
+  const sql = kind === "topics" ? "SELECT sort_order FROM topics LIMIT 1" : "SELECT teacher_comment, reviewed_at FROM submissions LIMIT 1";
+  let slot = v79Probe.get(env.CCv6_DB);
+  if (!slot) {
+    slot = {};
+    v79Probe.set(env.CCv6_DB, slot);
+  }
+  const cached = slot[kind];
+  if (cached && (cached.ok || Date.now() - cached.at < 20000)) return cached.ok;
+  let ok = true;
+  try {
+    await env.CCv6_DB.prepare(sql).first();
+  } catch (e) {
+    ok = false;
+  }
+  slot[kind] = { ok, at: Date.now() };
+  return ok;
+}
+
+// ---- thresholds shared by the Needs-attention queue and the dashboard alerts ----
+const DEFAULT_ALERT_SETTINGS = { lowScore: 10, fallbackCount: 3, noAiHours: 24 };
+function sanitizeAlertSettings(raw) {
+  const r = raw && typeof raw === "object" ? raw : {};
+  const num = (v, lo, hi, d) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.min(hi, Math.max(lo, Math.round(n))) : d;
+  };
+  return {
+    lowScore: num(r.lowScore, 0, 25, DEFAULT_ALERT_SETTINGS.lowScore),
+    fallbackCount: num(r.fallbackCount, 1, 10, DEFAULT_ALERT_SETTINGS.fallbackCount),
+    noAiHours: num(r.noAiHours, 1, 168, DEFAULT_ALERT_SETTINGS.noAiHours),
+  };
+}
+async function getAlertSettings(env) {
+  const stored = await getConfig(env, "alert_settings");
+  let parsed = null;
+  try {
+    parsed = stored ? JSON.parse(stored) : null;
+  } catch (e) {
+    parsed = null;
+  }
+  return sanitizeAlertSettings(parsed);
+}
+
+function roundMissingImproved(r) {
+  if (!r || r.markedBy === "fallback") return false; // an offline-marked round is reported as "offline", not as a missing rewrite
+  if (roundUnit(r) === UNIT_Q2Q3) {
+    if (Array.isArray(r.modelAnswers)) return r.modelAnswers.filter((x) => x && String(x).trim()).length < 2;
+    return !(r.modelAnswer && String(r.modelAnswer).trim());
+  }
+  return !(r.modelAnswer && String(r.modelAnswer).trim());
+}
+// Why a submission is on the Needs-attention list. [] = nothing to look at.
+function attentionReasons(sub, settings) {
+  const reasons = [];
+  const rounds = sub.rounds || [];
+  if (sub.gradingDegraded || rounds.some((r) => r && r.markedBy === "fallback")) reasons.push({ code: "offline", label: "Marked offline - needs an AI re-mark" });
+  if (sub.flagged) reasons.push({ code: "flagged", label: "Language was flagged" });
+  if (rounds.filter((r) => r && r.coachUsed).length >= 2) reasons.push({ code: "coach", label: "Coach used in 2 or more parts" });
+  if (Number.isFinite(sub.finalScore) && sub.finalScore < settings.lowScore) reasons.push({ code: "low", label: "Low score (" + sub.finalScore + " / " + sub.maxScore + ")" });
+  if (rounds.some(roundMissingImproved)) reasons.push({ code: "noimproved", label: "Improved answer missing" });
+  return reasons;
+}
+function submissionHasFallback(sub) {
+  return !!sub.gradingDegraded || (sub.rounds || []).some((r) => r && r.markedBy === "fallback");
+}
+
+// ---- teacher pupil report (B3) ----
+function buildPupilReport(rows, pupil, classRows) {
+  const series = computeProgressSeries(rows);
+  const byId = {};
+  for (const row of rows) byId[row.id] = row;
+  const attempts = series.entries.map((e) => ({
+    id: e.id,
+    createdAt: e.createdAt,
+    topicTitle: e.topicTitle,
+    finalScore: e.finalScore,
+    maxScore: e.maxScore,
+    practice: e.practice,
+    retryOf: e.retryOf,
+    units: e.units,
+    comment: byId[e.id] && byId[e.id].teacher_comment ? byId[e.id].teacher_comment : "",
+  }));
+  const retries = [];
+  for (const e of series.entries) {
+    if (!e.retryOf) continue;
+    const first = series.entries.find((x) => x.id === e.retryOf);
+    if (first) retries.push({ topicTitle: e.topicTitle, firstId: first.id, secondId: e.id, first: first.finalScore, second: e.finalScore, max: e.maxScore, gain: Math.round((e.finalScore - first.finalScore) * 10) / 10 });
+  }
+  const comments = attempts.filter((a) => a.comment).map((a) => ({ id: a.id, createdAt: a.createdAt, topicTitle: a.topicTitle, comment: a.comment }));
+  return { pupil, series, attempts, retries, comments, skillWeb: buildSkillReport(series.entries, classRows), generatedAt: Date.now() };
+}
+
+// ---- analytics extras (B5): topic x criterion heatmap and weekly trend ----
+function weekStartUTC(ms) {
+  const d = new Date(ms);
+  const back = (d.getUTCDay() + 6) % 7; // Monday = 0
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - back)).toISOString().slice(0, 10);
+}
+function computeAnalyticsExtras(rows) {
+  const topics = {};
+  const criteriaOrder = [];
+  const weeks = {};
+  for (const row of rows) {
+    let rounds;
+    try {
+      rounds = JSON.parse(row.rounds || "[]");
+    } catch (e) {
+      continue;
+    }
+    const title = row.topic_title || "(untitled)";
+    if (!topics[title]) topics[title] = { topic: title, n: 0, parts: {} };
+    topics[title].n++;
+    for (const r of rounds) {
+      for (const b of (r && r.breakdown) || []) {
+        if (!b || typeof b.part !== "string" || !(b.max > 0)) continue;
+        if (!criteriaOrder.includes(b.part)) criteriaOrder.push(b.part);
+        const p = topics[title].parts[b.part] || (topics[title].parts[b.part] = { points: 0, max: 0 });
+        p.points += Number(b.points) || 0;
+        p.max += b.max;
+      }
+    }
+    if (Number.isFinite(row.created_at)) {
+      const wk = weekStartUTC(row.created_at);
+      const w = weeks[wk] || (weeks[wk] = { weekStart: wk, n: 0, sumPct: 0 });
+      const max = row.max_score > 0 ? row.max_score : 25;
+      w.n++;
+      w.sumPct += ((row.final_score || 0) / max) * 100;
+    }
+  }
+  const topicList = Object.values(topics).sort((a, b) => b.n - a.n || a.topic.localeCompare(b.topic)).slice(0, 20);
+  return {
+    heatmap: {
+      criteria: criteriaOrder,
+      topics: topicList.map((t) => ({
+        topic: t.topic,
+        n: t.n,
+        cells: criteriaOrder.map((c) => (t.parts[c] && t.parts[c].max > 0 ? Math.round((t.parts[c].points / t.parts[c].max) * 100) : null)),
+      })),
+    },
+    weekly: Object.values(weeks).sort((a, b) => a.weekStart.localeCompare(b.weekStart)).map((w) => ({ weekStart: w.weekStart, n: w.n, avgPct: Math.round(w.sumPct / w.n) })),
+  };
+}
+function parseDateParam(v, endOfDay) {
+  if (v === null || v === undefined) return null;
+  const s = String(v).trim();
+  if (!s) return null;
+  if (/^\d{10,13}$/.test(s)) return Number(s);
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return null;
+  const t = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  if (!Number.isFinite(t)) return null;
+  return endOfDay ? t + 86400000 - 1 : t;
+}
+
+// ---- coach-tip templates (B8) ----
+const COACH_TEMPLATE_KINDS = ["starters", "story", "lesson"];
+const BUILTIN_COACH_TEMPLATES = [
+  { id: "builtin-starters-1", builtin: true, name: "Story starters", kind: "starters", lines: ["Last week, I...", "One time when I was at school...", "I still remember the day when..."] },
+  { id: "builtin-story-1", builtin: true, name: "Tell it in order", kind: "story", lines: ["Say WHEN and WHERE it happened first.", "Name WHO was there with you.", "Tell what happened step by step.", "End with how it finished."] },
+  { id: "builtin-lesson-1", builtin: true, name: "What I learnt", kind: "lesson", lines: ["Say what you learnt from it.", "Say how you would act next time.", "Suggest one thing others could do."] },
+];
+function sanitizeCoachTemplates(raw) {
+  const list = Array.isArray(raw) ? raw : [];
+  const out = [];
+  for (const t of list.slice(0, 30)) {
+    if (!t || typeof t !== "object") continue;
+    const name = String(t.name || "").trim().slice(0, 60);
+    const kind = COACH_TEMPLATE_KINDS.includes(t.kind) ? t.kind : null;
+    const lines = (Array.isArray(t.lines) ? t.lines : []).map((l) => String(l || "").trim().slice(0, 200)).filter(Boolean).slice(0, 12);
+    if (!name || !kind || !lines.length) continue;
+    out.push({ id: typeof t.id === "string" && /^[\w-]{1,40}$/.test(t.id) && !t.id.startsWith("builtin-") ? t.id : uid(), name, kind, lines });
+  }
+  return out;
+}
+async function getCoachTemplates(env) {
+  const stored = await getConfig(env, "coach_templates");
+  let parsed = [];
+  try {
+    parsed = stored ? JSON.parse(stored) : [];
+  } catch (e) {
+    parsed = [];
+  }
+  return sanitizeCoachTemplates(parsed);
 }
 
 function buildSubmissionsFilter(session, url) {
@@ -2630,6 +3545,7 @@ async function remarkSubmissionRound(env, row, roundIndex) {
     strengths: result.strengths || "",
     nextStep: result.nextStep || "",
     modelAnswer: result.modelAnswer || "",
+    ...(roundUnit(target) === UNIT_Q2Q3 ? { modelAnswers: result.modelAnswers || ["", ""], observed: result.observed || [] } : {}),
     markedBy: result.markedBy,
   };
 
@@ -2732,6 +3648,28 @@ async function overrideSubmissionRoundScore(env, row, roundIndex, newScore, newF
 }
 
 
+// v8.0.1: login-page artwork. The images live in login-art.js (base64 WebP) and are served as
+// ordinary cacheable image files, so only the one picture a pupil needs is downloaded.
+const LOGIN_ART_BYTES = {}; // decoded once per Worker instance
+function loginArtResponse(kind, n) {
+  const list = LOGIN_ART[kind];
+  if (!list || !Number.isInteger(n) || n < 0 || n >= list.length) return new Response("Not found", { status: 404 });
+  const key = kind + n;
+  if (!LOGIN_ART_BYTES[key]) {
+    const bin = atob(list[n]);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    LOGIN_ART_BYTES[key] = bytes;
+  }
+  return new Response(LOGIN_ART_BYTES[key], {
+    headers: {
+      "content-type": "image/webp",
+      // the version is in the URL, so a new set of pictures just uses a new version number
+      "cache-control": "public, max-age=31536000, immutable",
+    },
+  });
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -2745,6 +3683,13 @@ export default {
           "access-control-allow-methods": "GET,POST,PUT,DELETE,OPTIONS",
         },
       });
+    }
+
+    // login artwork: static images, no database needed
+    const artMatch = /^\/login-art\/v(\d+)\/(portrait|landscape)-(\d{1,2})\.webp$/.exec(pathname);
+    if (artMatch && (request.method === "GET" || request.method === "HEAD")) {
+      if (Number(artMatch[1]) !== LOGIN_ART_VERSION) return new Response("Not found", { status: 404 });
+      return loginArtResponse(artMatch[2], Number(artMatch[3]));
     }
 
     await ensureSeeded(env);
@@ -2842,7 +3787,10 @@ export default {
 
       // ---------- TOPICS ----------
       if (pathname === "/api/topics" && request.method === "GET") {
-        const { results } = await env.CCv6_DB.prepare("SELECT * FROM topics ORDER BY created_at ASC, rowid ASC").all();
+        // v7.9: a teacher-set order (sort_order, from migrations/v7_9.sql) comes first; topics never
+        // reordered keep their original created-at order after it. Before the migration: the old order.
+        const ordered = (await hasV79Columns(env, "topics")) ? "SELECT * FROM topics ORDER BY sort_order IS NULL, sort_order ASC, created_at ASC, rowid ASC" : "SELECT * FROM topics ORDER BY created_at ASC, rowid ASC";
+        const { results } = await env.CCv6_DB.prepare(ordered).all();
         return json({ topics: results.map(rowToTopic) });
       }
 
@@ -2986,6 +3934,8 @@ export default {
             strengths: unit2Result.strengths || "",
             nextStep: unit2Result.nextStep || "",
             modelAnswer: unit2Result.modelAnswer || "",
+            modelAnswers: unit2Result.modelAnswers || ["", ""],
+            observed: unit2Result.observed || [],
             flagged: roundInputs[1].anyFlag || roundInputs[2].anyFlag,
             markedBy: unit2Result.markedBy,
             coachUsed: !!(coachUsedIn[1] || coachUsedIn[2]),
@@ -3121,7 +4071,7 @@ export default {
         // shown to the teacher. The pupil only ever sees `pupilRecord`,
         // which has coachUsed stripped out - pupils are not told that
         // opening the NPC Coach is tracked.
-        const pupilRecord = redactForPupil(record);
+        const pupilRecord = redactForPupil(record, true);
         // retryEnabled tells the pupil's result screen whether to offer a
         // "Try Again" button. canRetry is false on a retry's own result
         // screen - one retry per attempt, so there's no third try.
@@ -3206,7 +4156,10 @@ export default {
           .prepare(`SELECT * FROM submissions ${whereSql} ORDER BY ${orderBy} LIMIT ? OFFSET ?`)
           .bind(...params, limit, offset)
           .all();
-        const submissions = results.map((r) => redactForPupil(rowToSubmission(r)));
+        const submissions = results.map((r) => {
+          const sub = rowToSubmission(r);
+          return redactForPupil(sub, isOwnSubmission(session, sub)); // peers: no marks; your own entries: full breakdown
+        });
         const total = totalRow ? totalRow.c : 0;
         return json({ submissions, total, offset, limit, hasMore: offset + limit < total });
       }
@@ -3240,9 +4193,40 @@ export default {
           .prepare("SELECT * FROM submissions WHERE LOWER(pupil_name) = LOWER(?) AND LOWER(pupil_class) = LOWER(?)" + topicSql + " ORDER BY " + myOrder + " LIMIT ? OFFSET ?")
           .bind(...myParams, limit, offset)
           .all();
-        const submissions = results.map((r) => redactForPupil(rowToSubmission(r)));
+        const submissions = results.map((r) => redactForPupil(rowToSubmission(r), true));
         const total = totalRow ? totalRow.c : 0;
         return json({ submissions, total, offset, limit, hasMore: offset + limit < total });
+      }
+
+      // v7.8 - GET /api/pupil/progress: the pupil's OWN compact history (latest
+      // 100, oldest first) for the My Progress tab. Owner only: it is built from
+      // the session's own name + class and nothing in the URL can change that.
+      // Contains only the pupil's own marks (which they already see in v7.7); no
+      // coach flags, no override details.
+      if (pathname === "/api/pupil/progress" && request.method === "GET") {
+        const session = await getSession(request, env);
+        if (!session) return json({ error: "Please log in first." }, 401);
+        if (session.role !== "pupil") return json({ error: "Only pupils have a My Progress page." }, 403);
+        const { results } = await env.CCv6_DB
+          .prepare("SELECT * FROM submissions WHERE LOWER(pupil_name) = LOWER(?) AND LOWER(pupil_class) = LOWER(?) ORDER BY created_at DESC LIMIT 100")
+          .bind(session.name, session.pupilClass || "unassigned")
+          .all();
+        return json(computeProgressSeries(results || []));
+      }
+
+      // v7.8 - GET /api/submissions/:id: ONE of the pupil's own submissions (used
+      // to open a Try Again entry's first try from My Progress / My Submissions).
+      // Owner only: someone else's id gets the same 404 as an id that does not exist.
+      if (pathname.startsWith("/api/submissions/") && pathname.split("/").length === 4 && request.method === "GET" && pathname !== "/api/submissions/mine" && pathname !== "/api/submissions/leaderboard") {
+        const session = await getSession(request, env);
+        if (!session) return json({ error: "Please log in first." }, 401);
+        if (session.role !== "pupil") return json({ error: "Not authorised." }, 403);
+        const id = pathname.split("/")[3];
+        const row = await env.CCv6_DB.prepare("SELECT * FROM submissions WHERE id = ?").bind(id).first();
+        if (!row) return json({ error: "Submission not found." }, 404);
+        const sub = rowToSubmission(row);
+        if (!isOwnSubmission(session, sub)) return json({ error: "Submission not found." }, 404);
+        return json({ submission: redactForPupil(sub, true) });
       }
 
       // POST /api/submissions/:id/remark { roundIndex } - re-run AI marking
@@ -3273,7 +4257,7 @@ export default {
         // A pupil (whether re-marking their own work, or - defensively -
         // ever reached this far on someone else's) never sees coachUsed or
         // the per-unit score breakdown - see redactForPupil.
-        const submission = session.role === "pupil" ? redactForPupil(result.submission) : result.submission;
+        const submission = session.role === "pupil" ? redactForPupil(result.submission, true) : result.submission;
         return json({ ok: true, alreadyMarked: !!result.alreadyMarked, success: !!result.success, addedToLeaderboard: !!result.addedToLeaderboard, message: result.message || null, submission });
       }
 
@@ -3337,6 +4321,9 @@ export default {
             "unit2_score",
             "unit1_breakdown",
             "unit2_breakdown",
+            // v7.9
+            "teacherComment",
+            "reviewedAt",
           ]
             .map(csvEscape)
             .join(",")
@@ -3395,6 +4382,8 @@ export default {
               new Date(s.createdAt).toISOString(),
               ...roundCols,
               ...schemeCols,
+              s.teacherComment ? s.teacherComment.text : "",
+              s.reviewedAt ? new Date(s.reviewedAt).toISOString() : "",
             ]
               .map(csvEscape)
               .join(",")
@@ -3521,6 +4510,23 @@ export default {
         return json({ ok: true, rubric, isDefault: false });
       }
 
+      // v7.7 - POST /api/teacher/submissions/:id/retry-model-answer { roundIndex }
+      // Regenerates only the improved ("AI suggested") answer(s) of one round;
+      // never changes scores, feedback, markedBy or the leaderboard.
+      if (pathname.startsWith("/api/teacher/submissions/") && pathname.endsWith("/retry-model-answer") && request.method === "POST") {
+        if (!requireTeacher(session)) return json({ error: "Not authorised." }, 403);
+        const id = pathname.split("/")[4];
+        const row = await env.CCv6_DB.prepare("SELECT * FROM submissions WHERE id = ?").bind(id).first();
+        if (!row) return json({ error: "Not found." }, 404);
+        if (!classAllowed(session, row.pupil_class)) return json({ error: "Not authorised for this pupil's class." }, 403);
+        const body = await request.json().catch(() => ({}));
+        const roundIndex = Number.isInteger(body.roundIndex) ? body.roundIndex : -1;
+        if (roundIndex < 0 || roundIndex > 2) return badRequest("roundIndex must be 0, 1, or 2.");
+        const result = await retryRoundModelAnswers(env, row, roundIndex);
+        if (!result.ok) return badRequest(result.error);
+        return json({ ok: true, success: !!result.success, message: result.message || "", submission: result.submission });
+      }
+
       // v7.6 - "Test this rubric": run the REAL marking chain on a sample
       // answer using the rubric text currently typed in Settings (saved or not),
       // and return the result WITHOUT saving anything anywhere - no submission,
@@ -3564,6 +4570,8 @@ export default {
           strengths: result.strengths || "",
           nextStep: result.nextStep || "",
           modelAnswer: result.modelAnswer || "",
+          modelAnswers: result.modelAnswers || undefined,
+          observed: result.observed || undefined,
           note: offline ? "No AI provider answered, so this is the offline keyword estimate - it does NOT use your rubric text. Try again in a moment." : "",
         });
       }
@@ -3572,15 +4580,278 @@ export default {
       // across the (non-practice, fully AI-marked) submissions in scope. Scoped
       // teacher-admins only ever see their own classes (same filter as the
       // Submissions tab). Pure arithmetic on stored rounds - no AI call.
+      // ================= v7.9 TEACHER-END ROUTES =================
+      // POST /api/teacher/submissions/:id/comment { comment } - a short note the
+      // pupil sees on their own result (empty text removes it). Class-scoped.
+      if (pathname.startsWith("/api/teacher/submissions/") && pathname.endsWith("/comment") && request.method === "POST") {
+        if (!requireTeacher(session)) return json({ error: "Not authorised." }, 403);
+        const id = pathname.split("/")[4];
+        const row = await env.CCv6_DB.prepare("SELECT * FROM submissions WHERE id = ?").bind(id).first();
+        if (!row) return json({ error: "Submission not found." }, 404);
+        if (!classAllowed(session, row.pupil_class)) return json({ error: "Not authorised for this pupil's class." }, 403);
+        if (!(await hasV79Columns(env, "submissions"))) return json({ error: V79_MIGRATION_MESSAGE, needsMigration: true }, 409);
+        const body = await request.json().catch(() => ({}));
+        const text = typeof body.comment === "string" ? body.comment.trim() : "";
+        if (text.length > 600) return badRequest("Please keep the note to 600 characters or fewer.");
+        if (text) {
+          const at = Date.now();
+          await env.CCv6_DB.prepare("UPDATE submissions SET teacher_comment = ?, comment_by = ?, comment_at = ? WHERE id = ?").bind(text, session.name || "teacher", at, id).run();
+          return json({ ok: true, teacherComment: { text, by: session.name || "teacher", at } });
+        }
+        await env.CCv6_DB.prepare("UPDATE submissions SET teacher_comment = ?, comment_by = ?, comment_at = ? WHERE id = ?").bind(null, null, null, id).run();
+        return json({ ok: true, teacherComment: null });
+      }
+
+      // POST /api/teacher/submissions/:id/reviewed { reviewed: true|false } - the "I have looked at this" tick.
+      if (pathname.startsWith("/api/teacher/submissions/") && pathname.endsWith("/reviewed") && request.method === "POST") {
+        if (!requireTeacher(session)) return json({ error: "Not authorised." }, 403);
+        const id = pathname.split("/")[4];
+        const row = await env.CCv6_DB.prepare("SELECT * FROM submissions WHERE id = ?").bind(id).first();
+        if (!row) return json({ error: "Submission not found." }, 404);
+        if (!classAllowed(session, row.pupil_class)) return json({ error: "Not authorised for this pupil's class." }, 403);
+        if (!(await hasV79Columns(env, "submissions"))) return json({ error: V79_MIGRATION_MESSAGE, needsMigration: true }, 409);
+        const body = await request.json().catch(() => ({}));
+        const on = body.reviewed !== false;
+        const at = on ? Date.now() : null;
+        await env.CCv6_DB.prepare("UPDATE submissions SET reviewed_at = ?, reviewed_by = ? WHERE id = ?").bind(at, on ? session.name || "teacher" : null, id).run();
+        return json({ ok: true, reviewedAt: at, reviewedBy: on ? session.name || "teacher" : null });
+      }
+
+      // GET /api/teacher/submissions/:id/linked - the other half of a first try / second try pair.
+      if (pathname.startsWith("/api/teacher/submissions/") && pathname.endsWith("/linked") && request.method === "GET") {
+        if (!requireTeacher(session)) return json({ error: "Not authorised." }, 403);
+        const id = pathname.split("/")[4];
+        const row = await env.CCv6_DB.prepare("SELECT * FROM submissions WHERE id = ?").bind(id).first();
+        if (!row) return json({ error: "Submission not found." }, 404);
+        if (!classAllowed(session, row.pupil_class)) return json({ error: "Not authorised for this pupil's class." }, 403);
+        let other = null;
+        let relation = null;
+        if (row.retry_of) {
+          other = await env.CCv6_DB.prepare("SELECT * FROM submissions WHERE id = ?").bind(row.retry_of).first();
+          relation = "this-is-second";
+        } else {
+          other = await env.CCv6_DB.prepare("SELECT * FROM submissions WHERE retry_of = ?").bind(id).first();
+          relation = "this-is-first";
+        }
+        // never hand over a row that is not the same pupil in a class this teacher may see
+        if (other && (!classAllowed(session, other.pupil_class) || other.pupil_name !== row.pupil_name)) other = null;
+        return json({ relation: other ? relation : null, linked: other ? rowToSubmission(other) : null });
+      }
+
+      // GET /api/teacher/submissions/:id - one submission, for opening it from the Needs-attention list. Class-scoped.
+      if (pathname.startsWith("/api/teacher/submissions/") && pathname.split("/").length === 5 && request.method === "GET" && !pathname.endsWith("/linked")) {
+        if (!requireTeacher(session)) return json({ error: "Not authorised." }, 403);
+        const id = pathname.split("/")[4];
+        const row = await env.CCv6_DB.prepare("SELECT * FROM submissions WHERE id = ?").bind(id).first();
+        if (!row) return json({ error: "Submission not found." }, 404);
+        if (!classAllowed(session, row.pupil_class)) return json({ error: "Not authorised for this pupil's class." }, 403);
+        return json({ submission: rowToSubmission(row) });
+      }
+
+      // GET /api/teacher/attention?class=&topic= - the Needs-attention queue (B1).
+      if (pathname === "/api/teacher/attention" && request.method === "GET") {
+        if (!requireTeacher(session)) return json({ error: "Not authorised." }, 403);
+        const settings = await getAlertSettings(env);
+        const { whereSql, params } = buildSubmissionsFilter(session, url);
+        const w = (whereSql ? whereSql + " AND " : "WHERE ") + "practice = 0";
+        const { results } = await env.CCv6_DB.prepare(`SELECT * FROM submissions ${w} ORDER BY created_at DESC LIMIT 300`).bind(...params).all();
+        const items = [];
+        for (const row of results || []) {
+          if (row.reviewed_at) continue;
+          const sub = rowToSubmission(row);
+          const reasons = attentionReasons(sub, settings);
+          if (reasons.length) items.push({ id: sub.id, pupilName: sub.pupilName, pupilClass: sub.pupilClass, topicTitle: sub.topicTitle, finalScore: sub.finalScore, maxScore: sub.maxScore, createdAt: sub.createdAt, retryOf: sub.retryOf, reasons });
+        }
+        items.sort((a, b) => b.reasons.length - a.reasons.length || b.createdAt - a.createdAt);
+        return json({ items: items.slice(0, 100), total: items.length, scanned: (results || []).length, settings, reviewTracking: await hasV79Columns(env, "submissions") });
+      }
+
+      // POST /api/teacher/attention/bulk { ids, action } - action: remark | retry-improved | archive | reviewed.
+      // AI actions take at most 10 ids per request (the page sends them one at a time and shows progress).
+      if (pathname === "/api/teacher/attention/bulk" && request.method === "POST") {
+        if (!requireTeacher(session)) return json({ error: "Not authorised." }, 403);
+        const body = await request.json().catch(() => ({}));
+        const action = String(body.action || "");
+        if (!["remark", "retry-improved", "archive", "reviewed"].includes(action)) return badRequest("Unknown action.");
+        const ids = Array.isArray(body.ids) ? [...new Set(body.ids.filter((x) => typeof x === "string" && x))] : [];
+        if (!ids.length) return badRequest("Choose at least one submission.");
+        const ai = action === "remark" || action === "retry-improved";
+        if (ids.length > (ai ? 10 : 100)) return badRequest(ai ? "AI actions take at most 10 submissions at a time." : "At most 100 submissions at a time.");
+        if (action === "reviewed" && !(await hasV79Columns(env, "submissions"))) return json({ error: V79_MIGRATION_MESSAGE, needsMigration: true }, 409);
+        const results = [];
+        for (const id of ids) {
+          let row = await env.CCv6_DB.prepare("SELECT * FROM submissions WHERE id = ?").bind(id).first();
+          if (!row) { results.push({ id, ok: false, message: "Not found." }); continue; }
+          if (!classAllowed(session, row.pupil_class)) { results.push({ id, ok: false, message: "Not one of your classes." }); continue; }
+          try {
+            if (action === "archive") {
+              await env.CCv6_DB.prepare("UPDATE submissions SET archived = ? WHERE id = ?").bind(1, id).run();
+              results.push({ id, ok: true, message: "Archived." });
+            } else if (action === "reviewed") {
+              await env.CCv6_DB.prepare("UPDATE submissions SET reviewed_at = ?, reviewed_by = ? WHERE id = ?").bind(Date.now(), session.name || "teacher", id).run();
+              results.push({ id, ok: true, message: "Marked as reviewed." });
+            } else {
+              let changed = 0, tried = 0, last = "";
+              const count = JSON.parse(row.rounds || "[]").length;
+              for (let i = 0; i < count; i++) {
+                const rounds = JSON.parse(row.rounds || "[]");
+                const r = rounds[i];
+                const needs = action === "remark" ? r && r.markedBy === "fallback" : roundMissingImproved(r);
+                if (!needs) continue;
+                tried++;
+                const res = action === "remark" ? await remarkSubmissionRound(env, row, i) : await retryRoundModelAnswers(env, row, i);
+                if (res && res.ok && res.success) changed++;
+                else last = (res && (res.message || res.error)) || "The AI is not available right now.";
+                row = (await env.CCv6_DB.prepare("SELECT * FROM submissions WHERE id = ?").bind(id).first()) || row;
+              }
+              if (!tried) results.push({ id, ok: true, message: "Nothing needed doing." });
+              else if (changed === tried) results.push({ id, ok: true, message: action === "remark" ? "Re-marked by AI." : "Improved answer added." });
+              else results.push({ id, ok: false, message: (changed ? "Partly done. " : "") + last });
+            }
+          } catch (e) {
+            results.push({ id, ok: false, message: "Something went wrong: " + (e && e.message ? e.message : String(e)) });
+          }
+        }
+        return json({ ok: true, results, done: results.filter((r) => r.ok).length, failed: results.filter((r) => !r.ok).length });
+      }
+
+      // GET /api/teacher/pupil-progress?name=&class= - one pupil's report (B3): the same
+      // series the pupil sees, plus retries and teacher comments. Class-scoped.
+      if (pathname === "/api/teacher/pupil-progress" && request.method === "GET") {
+        if (!requireTeacher(session)) return json({ error: "Not authorised." }, 403);
+        const name = (url.searchParams.get("name") || "").trim();
+        const pupilClass = (url.searchParams.get("class") || "unassigned").trim();
+        if (!name) return badRequest("Missing pupil name.");
+        if (!classAllowed(session, pupilClass)) return json({ error: "Not authorised for this pupil's class." }, 403);
+        const { results } = await env.CCv6_DB.prepare("SELECT * FROM submissions WHERE pupil_name = ? AND pupil_class = ? ORDER BY created_at DESC LIMIT 200").bind(name, pupilClass).all();
+        // v7.10: the class's non-practice rows, for the "class average" outline on the skill web
+        const classRes = await env.CCv6_DB
+          .prepare("SELECT pupil_class, topic_title, rounds, final_score, max_score, created_at FROM submissions WHERE LOWER(pupil_class) = LOWER(?) AND practice = 0 AND archived = 0 ORDER BY created_at DESC LIMIT 600")
+          .bind(pupilClass)
+          .all();
+        return json(buildPupilReport(results || [], { name, pupilClass }, classRes.results || []));
+      }
+
+      // GET /api/teacher/alerts - dashboard banner + AI provider usage (B6). Scoped like everything else.
+      if (pathname === "/api/teacher/alerts" && request.method === "GET") {
+        if (!requireTeacher(session)) return json({ error: "Not authorised." }, 403);
+        const settings = await getAlertSettings(env);
+        const { whereSql, params } = buildSubmissionsFilter(session, new URL("https://x.invalid/"));
+        const w = (whereSql ? whereSql + " AND " : "WHERE ") + "practice = 0";
+        const { results } = await env.CCv6_DB.prepare(`SELECT * FROM submissions ${w} ORDER BY created_at DESC LIMIT 300`).bind(...params).all();
+        const subs = (results || []).map((r) => rowToSubmission(r));
+        const now = Date.now();
+        const alerts = [];
+        const last10 = subs.slice(0, 10);
+        const fallbackCount = last10.filter(submissionHasFallback).length;
+        if (last10.length >= settings.fallbackCount && fallbackCount >= settings.fallbackCount) {
+          alerts.push({ code: "fallback", level: "warn", message: fallbackCount + " of the last " + last10.length + " submissions were marked offline instead of by AI. The AI may be down or out of quota - check the AI status in Settings." });
+        }
+        const windowRows = subs.filter((s) => now - s.createdAt <= settings.noAiHours * 3600000);
+        if (windowRows.length > 0 && windowRows.every(submissionHasFallback)) {
+          alerts.push({ code: "no-ai", level: "warn", message: "None of the " + windowRows.length + " submissions in the last " + settings.noAiHours + " hours were marked by AI." });
+        }
+        const usage = (ms) => {
+          const counts = {};
+          for (const s of subs) {
+            if (now - s.createdAt > ms) continue;
+            for (const r of s.rounds || []) {
+              const k = (r && r.markedBy) || "unknown";
+              counts[k] = (counts[k] || 0) + 1;
+            }
+          }
+          return counts;
+        };
+        const attentionCount = subs.filter((s) => !s.reviewedAt && attentionReasons(s, settings).length).length;
+        return json({ alerts, providers: { day: usage(86400000), week: usage(7 * 86400000) }, attentionCount, settings });
+      }
+
+      if (pathname === "/api/teacher/alert-settings" && request.method === "GET") {
+        if (!requireTeacher(session)) return json({ error: "Not authorised." }, 403);
+        return json({ settings: await getAlertSettings(env), defaults: DEFAULT_ALERT_SETTINGS });
+      }
+      if (pathname === "/api/teacher/alert-settings" && request.method === "POST") {
+        if (!requireSuperAdmin(session)) return json({ error: "Not authorised." }, 403);
+        const body = await request.json().catch(() => ({}));
+        const settings = sanitizeAlertSettings(body.settings || body);
+        await setConfig(env, "alert_settings", JSON.stringify(settings));
+        return json({ ok: true, settings });
+      }
+
+      // Coach-tip templates (B8): saved starter lines a teacher can drop into a topic's coach tips.
+      if (pathname === "/api/teacher/coach-templates" && request.method === "GET") {
+        if (!requireTeacher(session)) return json({ error: "Not authorised." }, 403);
+        return json({ templates: await getCoachTemplates(env), builtin: BUILTIN_COACH_TEMPLATES });
+      }
+      if (pathname === "/api/teacher/coach-templates" && request.method === "POST") {
+        if (!requireSuperAdmin(session)) return json({ error: "Not authorised." }, 403);
+        const body = await request.json().catch(() => ({}));
+        const templates = sanitizeCoachTemplates(body.templates);
+        await setConfig(env, "coach_templates", JSON.stringify(templates));
+        return json({ ok: true, templates });
+      }
+
+      // Topic tools (B8): duplicate and reorder (super admin, like all topic editing).
+      if (pathname.startsWith("/api/teacher/topics/") && pathname.endsWith("/duplicate") && request.method === "POST") {
+        if (!requireSuperAdmin(session)) return json({ error: "Not authorised." }, 403);
+        const id = pathname.split("/")[4];
+        const src = await env.CCv6_DB.prepare("SELECT * FROM topics WHERE id = ?").bind(id).first();
+        if (!src) return json({ error: "Topic not found." }, 404);
+        const t = rowToTopic(src);
+        const copy = { ...t, id: uid(), title: (t.title + " (copy)").slice(0, 200) };
+        await env.CCv6_DB
+          .prepare(
+            `INSERT INTO topics (id, title, image_url, image_description, questions, tags, coach, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+               title = excluded.title, image_url = excluded.image_url, image_description = excluded.image_description,
+               questions = excluded.questions, tags = excluded.tags, coach = excluded.coach`
+          )
+          .bind(copy.id, copy.title, copy.imageUrl, copy.imageDescription, JSON.stringify(copy.questions), JSON.stringify(copy.tags), JSON.stringify(copy.coach), Date.now())
+          .run();
+        return json({ topic: copy });
+      }
+      if (pathname === "/api/teacher/topics/reorder" && request.method === "POST") {
+        if (!requireSuperAdmin(session)) return json({ error: "Not authorised." }, 403);
+        if (!(await hasV79Columns(env, "topics"))) return json({ error: V79_MIGRATION_MESSAGE, needsMigration: true }, 409);
+        const body = await request.json().catch(() => ({}));
+        const ids = Array.isArray(body.ids) ? body.ids.filter((x) => typeof x === "string" && x) : [];
+        if (!ids.length) return badRequest("No topics to order.");
+        for (let i = 0; i < ids.length; i++) {
+          await env.CCv6_DB.prepare("UPDATE topics SET sort_order = ? WHERE id = ?").bind(i, ids[i]).run();
+        }
+        return json({ ok: true, count: ids.length });
+      }
+
       if (pathname === "/api/teacher/analytics" && request.method === "GET") {
         if (!requireTeacher(session)) return json({ error: "Not authorised." }, 403);
         const { whereSql, params } = buildSubmissionsFilter(session, url);
-        const w = (whereSql ? whereSql + " AND " : "WHERE ") + "practice = 0 AND grading_degraded = 0";
+        let w = (whereSql ? whereSql + " AND " : "WHERE ") + "practice = 0 AND grading_degraded = 0";
+        // v7.9: optional date range (from / to as YYYY-MM-DD or epoch ms) and a bigger window (2000, was 500)
+        const fromMs = parseDateParam(url.searchParams.get("from"), false);
+        const toMs = parseDateParam(url.searchParams.get("to"), true);
+        const bind = params.slice();
+        if (fromMs !== null) { w += " AND created_at >= ?"; bind.push(fromMs); }
+        if (toMs !== null) { w += " AND created_at <= ?"; bind.push(toMs); }
         const { results } = await env.CCv6_DB
-          .prepare(`SELECT pupil_class, topic_title, rounds, final_score FROM submissions ${w} ORDER BY created_at DESC LIMIT 500`)
-          .bind(...params)
+          .prepare(`SELECT pupil_class, topic_title, rounds, final_score, max_score, created_at FROM submissions ${w} ORDER BY created_at DESC LIMIT 2001`)
+          .bind(...bind)
           .all();
-        return json(computeAnalytics(results || []));
+        const all = results || [];
+        const capped = all.length > 2000;
+        const rows = capped ? all.slice(0, 2000) : all;
+        // v7.10: the skill web also takes submissions that still carry an offline part which a
+        // teacher has marked (grading_degraded stays 1 after an override), so it reads its own
+        // rows (same filters, same window) and decides part by part what qualifies.
+        let w2 = (whereSql ? whereSql + " AND " : "WHERE ") + "practice = 0";
+        const bind2 = params.slice();
+        if (fromMs !== null) { w2 += " AND created_at >= ?"; bind2.push(fromMs); }
+        if (toMs !== null) { w2 += " AND created_at <= ?"; bind2.push(toMs); }
+        const skillRes = await env.CCv6_DB
+          .prepare(`SELECT pupil_class, topic_title, rounds, final_score, max_score, created_at FROM submissions ${w2} ORDER BY created_at DESC LIMIT 2000`)
+          .bind(...bind2)
+          .all();
+        return json({ ...computeAnalytics(rows), ...computeAnalyticsExtras(rows), skillWeb: computeSkillInsights(skillRes.results || []), capped, window: 2000, range: { from: fromMs, to: toMs } });
       }
 
       // v7.5 - separate rubric for Unit 2 (Questions 2 + 3 marked together).
@@ -3776,6 +5047,31 @@ export default {
         const whereSql = where.length ? "WHERE " + where.join(" AND ") : "";
         const { results } = await env.CCv6_DB.prepare(`SELECT * FROM pupils ${whereSql} ORDER BY pupil_class, name`).bind(...params).all();
         return json({ pupils: results.map(rowToPupil) });
+      }
+
+      // v8.0: small skill shapes for the Pupils list (one per pupil, last 5 usable attempts each).
+      if (pathname === "/api/teacher/pupil-skills" && request.method === "GET") {
+        if (!requireTeacher(session)) return json({ error: "Not authorised." }, 403);
+        const where = ["practice = 0", "archived = 0"];
+        const params = [];
+        if (!session.isSuperAdmin) {
+          const classes = (session.assignedClasses || []).map((c) => String(c).toLowerCase());
+          if (!classes.length) return json({ pupils: [], capped: false });
+          where.push(`LOWER(pupil_class) IN (${classes.map(() => "?").join(",")})`);
+          params.push(...classes);
+        }
+        const classParam = (url.searchParams.get("class") || "").trim();
+        if (classParam) {
+          where.push("LOWER(pupil_class) = LOWER(?)");
+          params.push(classParam);
+        }
+        const { results } = await env.CCv6_DB
+          .prepare(`SELECT * FROM submissions WHERE ${where.join(" AND ")} ORDER BY created_at DESC LIMIT 3001`)
+          .bind(...params)
+          .all();
+        const all = results || [];
+        const capped = all.length > 3000;
+        return json({ pupils: computePupilSkillMinis(capped ? all.slice(0, 3000) : all), capped });
       }
 
       // Distinct class names this session may see - powers the Class filter
