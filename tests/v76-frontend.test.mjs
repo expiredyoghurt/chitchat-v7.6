@@ -2,7 +2,7 @@
 // strengths/next step, pupil history filters, teacher submission summary,
 // rubric guardrails + test panel, class insights.
 import { JSDOM } from "jsdom";
-import { PAGE_HTML } from "../frontend.js";
+import { PAGE_HTML } from "../src/frontend.js";
 
 const fetchLog = [];
 let respond = () => ({});

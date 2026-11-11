@@ -2,7 +2,7 @@
 // handlers: GET /api/submissions/leaderboard, GET /api/submissions/mine,
 // and POST /api/submissions/:id/remark - including the "only join the
 // leaderboard once every question is AI-marked" transition.
-import worker, { __resetAiHealthForTests } from "../index.js";
+import worker, { __resetAiHealthForTests } from "../src/index.js";
 
 const results = [];
 function check(label, cond, extra) {

@@ -1,6 +1,6 @@
 // v7.7 backend: pupil's own breakdown, per-answer improved rewrites (doubled cap), Present / Not observed,
 // 'Retry AI suggested answer', output-token limit.
-import worker, { __resetAiHealthForTests } from "../index.js";
+import worker, { __resetAiHealthForTests } from "../src/index.js";
 
 const results = [];
 function check(label, cond, extra) {
@@ -491,7 +491,7 @@ function countW(t) { return String(t || "").trim().split(/\s+/).filter(Boolean).
   const env = baseEnv({ GROQ_API_KEY: "k" });
   await submitFor(env, "pup1", "topic_1", "tok");
   check("Groq requests carry an explicit completion-token ceiling of 6000", f.calls.every((c) => c.body.max_completion_tokens === 6000));
-  const src = (await import("node:fs")).readFileSync(new URL("../index.js", import.meta.url), "utf8");
+  const src = (await import("node:fs")).readFileSync(new URL("../src/index.js", import.meta.url), "utf8");
   check("OpenRouter and Workers AI also set max_tokens, Gemini sets maxOutputTokens", (src.match(/max_tokens: AI_MAX_OUTPUT_TOKENS/g) || []).length === 2 && /maxOutputTokens: AI_MAX_OUTPUT_TOKENS \+ 2048/.test(src));
 }
 

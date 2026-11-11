@@ -1,7 +1,7 @@
 // v7.10 UI in jsdom: pupil My Skill Web, result + retry overlays, teacher report web, Insights web/heatmap toggle,
 // and cache invalidation after a re-mark / override.
 import { JSDOM } from "jsdom";
-import { PAGE_HTML } from "../frontend.js";
+import { PAGE_HTML } from "../src/frontend.js";
 
 const results = [];
 function check(label, cond, extra) {

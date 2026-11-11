@@ -1,7 +1,7 @@
 // v7.9 backend: migration detection, teacher notes, reviewed ticks, Needs-attention + bulk actions, linked retries,
 // pupil report, analytics range/heatmap/weekly, dashboard alerts, alert settings, topic duplicate/reorder, coach templates, CSV.
 import { check, summary, baseEnv, loginAll, get, post, call, subRow, q1Round, q23Round, crit } from "./_fake.mjs";
-import { redactForPupil, attentionReasons, computeAnalyticsExtras } from "../index.js";
+import { redactForPupil, attentionReasons, computeAnalyticsExtras } from "../src/index.js";
 
 loginAll();
 const DAY = 86400000, NOW = Date.now();
@@ -322,7 +322,7 @@ const coachy = () => [q1Round(15, { coachUsed: true }), q23Round(15, { coachUsed
   const env = baseEnv();
   env.CCv6_DB._state.submissions.push(subRow({ id: "c1", name: "Jovan", cls: "5ig", at: NOW, extra: { teacher_comment: 'Nice, "detail"', comment_by: "t", comment_at: NOW, reviewed_at: NOW } }));
   env.CCv6_DB._state.submissions.push(subRow({ id: "c2", name: "Mei", cls: "5ig", at: NOW - 5000 }));
-  const res = await (await import("../index.js")).default.fetch(new Request("https://x.dev/api/teacher/submissions/export", { headers: { authorization: "Bearer admin" } }), env, {});
+  const res = await (await import("../src/index.js")).default.fetch(new Request("https://x.dev/api/teacher/submissions/export", { headers: { authorization: "Bearer admin" } }), env, {});
   const csv = await res.text();
   const lines = csv.split("\r\n");
   check("csv: header ends with teacherComment, reviewedAt", /,teacherComment,reviewedAt$/.test(lines[0]), lines[0].slice(-60));

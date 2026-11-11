@@ -1,7 +1,7 @@
 // v7.7 UI in jsdom: pupil's own marks + Present/Not observed, the 'Your response | Improved response' table,
 // Q2&3 labelling, teacher 'Retry AI suggested answer'.
 import { JSDOM } from "jsdom";
-import { PAGE_HTML } from "../frontend.js";
+import { PAGE_HTML } from "../src/frontend.js";
 
 const fetchLog = [];
 let respond = () => ({});

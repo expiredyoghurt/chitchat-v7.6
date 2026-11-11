@@ -1,6 +1,6 @@
 // v7.9 teacher UI + pupil note in jsdom.
 import { JSDOM } from "jsdom";
-import { PAGE_HTML } from "../frontend.js";
+import { PAGE_HTML } from "../src/frontend.js";
 
 const results = [];
 function check(label, cond, extra) {

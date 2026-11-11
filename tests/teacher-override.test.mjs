@@ -3,7 +3,7 @@
 // never be able to see another pupil's submission unless every question on
 // it was actually assessed by AI - a teacher's manual override must never
 // be able to satisfy that on its own.
-import worker, { __resetAiHealthForTests } from "../index.js";
+import worker, { __resetAiHealthForTests } from "../src/index.js";
 
 const results = [];
 function check(label, cond, extra) {

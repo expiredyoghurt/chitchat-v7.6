@@ -1,7 +1,7 @@
 // Exercises the provider-aware reliability layer in isolation: error
 // classification, health/cooldown bookkeeping, in-place retry, and the
 // candidate ordering that replaces the old flat key1->key2->key3 list.
-import worker, { __resetAiHealthForTests } from "../index.js";
+import worker, { __resetAiHealthForTests } from "../src/index.js";
 
 const results = [];
 function check(label, cond, extra) {

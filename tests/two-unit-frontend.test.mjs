@@ -3,7 +3,7 @@
 // teacher submission detail shows the per-unit breakdown, and a legacy
 // 3-round submission still renders as three questions.
 import { JSDOM } from "jsdom";
-import { PAGE_HTML } from "../frontend.js";
+import { PAGE_HTML } from "../src/frontend.js";
 
 const dom = new JSDOM(PAGE_HTML, { runScripts: "dangerously", url: "https://example.com/" });
 const { window } = dom;

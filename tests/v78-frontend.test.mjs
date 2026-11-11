@@ -1,6 +1,6 @@
 // v7.8 pupil UI in jsdom: draft autosave, My Progress, retry comparison + "Use this sentence", "what's new" highlight.
 import { JSDOM } from "jsdom";
-import { PAGE_HTML } from "../frontend.js";
+import { PAGE_HTML } from "../src/frontend.js";
 
 const results = [];
 function check(label, cond, extra) {

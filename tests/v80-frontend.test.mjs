@@ -1,7 +1,7 @@
 // v8.0 UI in jsdom: tappable chart, words-first summaries, keyboard focus, first-use hint,
 // Skill Coach + quest, and the teacher's mini skill shapes.
 import { JSDOM } from "jsdom";
-import { PAGE_HTML } from "../frontend.js";
+import { PAGE_HTML } from "../src/frontend.js";
 
 const results = [];
 function check(label, cond, extra) {

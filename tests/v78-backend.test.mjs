@@ -1,6 +1,6 @@
 // v7.8 backend: computeProgressSeries, GET /api/pupil/progress (owner only), GET /api/submissions/:id (owner only).
 import { check, summary, baseEnv, loginAll, get, post, subRow, q1Round, q23Round, crit } from "./_fake.mjs";
-import { computeProgressSeries } from "../index.js";
+import { computeProgressSeries } from "../src/index.js";
 
 loginAll();
 const DAY = 86400000, T0 = Date.UTC(2026, 8, 1);

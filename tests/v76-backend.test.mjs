@@ -1,5 +1,5 @@
 // v7.6 backend: coach tips, strengths/next step, pupil history filters, class insights, rubric test.
-import worker, { __resetAiHealthForTests } from "../index.js";
+import worker, { __resetAiHealthForTests } from "../src/index.js";
 
 const results = [];
 function check(label, cond, extra) {

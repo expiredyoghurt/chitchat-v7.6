@@ -2,7 +2,7 @@
 // are marked TOGETHER in ONE AI call on a modified rubric (Experience 16 /
 // Suggestion 2 / Language 7). finalScore = average of the 2 unit scores.
 // Pupils only ever see the overall average; teachers see the breakdown.
-import worker, { __resetAiHealthForTests } from "../index.js";
+import worker, { __resetAiHealthForTests } from "../src/index.js";
 
 const results = [];
 function check(label, cond, extra) {

@@ -1,7 +1,7 @@
 // v7.10 backend: the skill web. Built from stored marks on every read, so a teacher override or an AI re-mark
 // shows up straight away; offline-estimated parts stay out until a teacher marks or an AI re-marks them.
 import { check, summary, baseEnv, loginAll, get, post, subRow, crit } from "./_fake.mjs";
-import { skillsOfRounds, buildSkillWeb, computeProgressSeries, redactForPupil, scaleBreakdownToScore, __resetAiHealthForTests } from "../index.js";
+import { skillsOfRounds, buildSkillWeb, computeProgressSeries, redactForPupil, scaleBreakdownToScore, __resetAiHealthForTests } from "../src/index.js";
 
 loginAll();
 const DAY = 86400000, NOW = Date.now(), T0 = NOW - 60 * DAY;

@@ -2,7 +2,7 @@
 // an in-memory stand-in for D1 + KV, so the retry rules (one per attempt,
 // same session, own attempt, same topic, class toggle) are tested as the
 // Worker actually runs them.
-import worker from "../index.js";
+import worker from "../src/index.js";
 
 const results = [];
 function check(label, cond, extra) {

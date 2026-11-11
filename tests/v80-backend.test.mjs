@@ -1,6 +1,6 @@
 // v8.0 backend: small skill shapes per pupil for the teacher's Pupils list.
 import { check, summary, baseEnv, loginAll, get, post, subRow, crit } from "./_fake.mjs";
-import { computePupilSkillMinis, skillsOfRounds } from "../index.js";
+import { computePupilSkillMinis, skillsOfRounds } from "../src/index.js";
 
 loginAll();
 const DAY = 86400000, T0 = Date.now() - 60 * DAY;

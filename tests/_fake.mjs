@@ -1,6 +1,6 @@
 // Shared test helpers for the v7.8 / v7.9 suites: a small in-memory D1 + KV stand-in that understands
 // ONLY the SQL these builds issue, plus request helpers. (Older suites keep their own fakes.)
-import worker from "../index.js";
+import worker from "../src/index.js";
 
 export const results = [];
 export function check(label, cond, extra) {

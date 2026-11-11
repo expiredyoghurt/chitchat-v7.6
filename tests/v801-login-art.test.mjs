@@ -1,9 +1,9 @@
 // v8.0.1: login-page artwork (10 portrait cards + 10 landscape banners), served by the Worker and
 // shown on the login page: random start, then each next picture in order.
 import { JSDOM } from "jsdom";
-import worker from "../index.js";
-import { PAGE_HTML } from "../frontend.js";
-import { LOGIN_ART, LOGIN_ART_DIMS, LOGIN_ART_VERSION } from "../login-art.js";
+import worker from "../src/index.js";
+import { PAGE_HTML } from "../src/frontend.js";
+import { LOGIN_ART, LOGIN_ART_DIMS, LOGIN_ART_VERSION } from "../src/login-art.js";
 import { baseEnv } from "./_fake.mjs";
 
 const results = [];
@@ -21,6 +21,7 @@ const webpSize = (b) => { // lossy WebP ('VP8 ') header: 14-bit width / height
   return [(b[26] | (b[27] << 8)) & 0x3fff, (b[28] | (b[29] << 8)) & 0x3fff];
 };
 {
+  check("art: the pictures are 2x the sheet resolution or better (portrait 576 wide, landscape wider than the sheet's 824)", LOGIN_ART_DIMS.portrait.every((d) => d[0] === 576 && d[1] === 960) && LOGIN_ART_DIMS.landscape.every((d) => d[0] >= 1200) && LOGIN_ART_VERSION >= 2);
   check("art: there are 10 portrait and 10 landscape pictures", LOGIN_ART.portrait.length === 10 && LOGIN_ART.landscape.length === 10 && LOGIN_ART_DIMS.portrait.length === 10 && LOGIN_ART_DIMS.landscape.length === 10);
   let okAll = true, bad = [], total = 0;
   for (const kind of ["portrait", "landscape"]) {
@@ -33,14 +34,14 @@ const webpSize = (b) => { // lossy WebP ('VP8 ') header: 14-bit width / height
     }
   }
   check("route: all 20 pictures are served as image/webp, cached for a year, and each file's real size matches the size the page is told", okAll, bad);
-  check("route: total picture weight stays modest (under 600 KB for all 20; one visit downloads only one)", total < 600 * 1024, Math.round(total / 1024) + " KB");
-  const a = await (await get(`/login-art/v1/portrait-3.webp`)).arrayBuffer(), b = await (await get(`/login-art/v1/portrait-3.webp`)).arrayBuffer();
+  check("route: total picture weight stays modest (under 1.1 MB for all 20; one visit downloads only one, about 40-60 KB)", total < 1100 * 1024, Math.round(total / 1024) + " KB");
+  const a = await (await get(`/login-art/v${LOGIN_ART_VERSION}/portrait-3.webp`)).arrayBuffer(), b = await (await get(`/login-art/v${LOGIN_ART_VERSION}/portrait-3.webp`)).arrayBuffer();
   check("route: repeat requests return identical bytes (decoded once, then reused)", a.byteLength === b.byteLength && a.byteLength > 1000);
-  check("route: it needs no database or login (works with an empty environment, no bindings at all)", (await get(`/login-art/v1/landscape-0.webp`, "GET", {})).status === 200);
-  check("route: HEAD works too", (await get(`/login-art/v1/landscape-0.webp`, "HEAD")).status === 200);
-  check("route: a picture number out of range is a 404", (await get(`/login-art/v1/portrait-10.webp`)).status === 404 && (await get(`/login-art/v1/landscape-99.webp`)).status === 404);
-  check("route: a different version number or orientation is a 404", (await get(`/login-art/v2/portrait-0.webp`)).status === 404 && (await get(`/login-art/v1/square-0.webp`)).status === 404 && (await get(`/login-art/v1/portrait-0.png`)).status === 404);
-  check("route: POST is not served as an image", (await get(`/login-art/v1/portrait-0.webp`, "POST")).status !== 200);
+  check("route: it needs no database or login (works with an empty environment, no bindings at all)", (await get(`/login-art/v${LOGIN_ART_VERSION}/landscape-0.webp`, "GET", {})).status === 200);
+  check("route: HEAD works too", (await get(`/login-art/v${LOGIN_ART_VERSION}/landscape-0.webp`, "HEAD")).status === 200);
+  check("route: a picture number out of range is a 404", (await get(`/login-art/v${LOGIN_ART_VERSION}/portrait-10.webp`)).status === 404 && (await get(`/login-art/v${LOGIN_ART_VERSION}/landscape-99.webp`)).status === 404);
+  check("route: a different version number or orientation is a 404", (await get(`/login-art/v${LOGIN_ART_VERSION + 1}/portrait-0.webp`)).status === 404 && (await get(`/login-art/v${LOGIN_ART_VERSION}/square-0.webp`)).status === 404 && (await get(`/login-art/v${LOGIN_ART_VERSION}/portrait-0.png`)).status === 404);
+  check("route: POST is not served as an image", (await get(`/login-art/v${LOGIN_ART_VERSION}/portrait-0.webp`, "POST")).status !== 200);
 }
 
 // ================= login page =================
@@ -61,8 +62,8 @@ const idxOf = (a) => Number(/portrait-(\d+)\.webp/.exec(a.doc.querySelector(".lo
   const art = a.doc.querySelector(".login-art");
   check("login: the artwork is on the login page, above the card", !!art && !!(art.compareDocumentPosition(a.doc.querySelector(".login-card")) & 4));
   const src = art.querySelector("source"), img = art.querySelector("img");
-  check("login: portrait cards for upright screens (phones, tablets), landscape banners otherwise, via <picture>", /orientation: portrait/.test(src.getAttribute("media")) && /^\/login-art\/v1\/portrait-4\.webp$/.test(src.getAttribute("srcset")) && /^\/login-art\/v1\/landscape-4\.webp$/.test(img.getAttribute("src")));
-  check("login: the picture carries its real width and height, so nothing jumps while it loads", img.getAttribute("width") === String(LOGIN_ART_DIMS.landscape[4][0]) && img.getAttribute("height") === String(LOGIN_ART_DIMS.landscape[4][1]) && src.getAttribute("width") === "288" && src.getAttribute("height") === "480");
+  check("login: portrait cards for upright screens (phones, tablets), landscape banners otherwise, via <picture>", /orientation: portrait/.test(src.getAttribute("media")) && new RegExp("^/login-art/v" + LOGIN_ART_VERSION + "/portrait-4\\.webp$").test(src.getAttribute("srcset")) && new RegExp("^/login-art/v" + LOGIN_ART_VERSION + "/landscape-4\\.webp$").test(img.getAttribute("src")));
+  check("login: the picture carries its real width and height, so nothing jumps while it loads", img.getAttribute("width") === String(LOGIN_ART_DIMS.landscape[4][0]) && img.getAttribute("height") === String(LOGIN_ART_DIMS.landscape[4][1]) && src.getAttribute("width") === String(LOGIN_ART_DIMS.portrait[4][0]) && src.getAttribute("height") === String(LOGIN_ART_DIMS.portrait[4][1]));
   check("login: it has a text alternative (the words on the sign)", /Just a Chit-Chat\. Have a chat\. Share your thoughts!/.test(img.getAttribute("alt")));
   check("login: the same animal is shown in both orientations (same number)", img.getAttribute("src").match(/landscape-(\d+)/)[1] === src.getAttribute("srcset").match(/portrait-(\d+)/)[1]);
   const css = a.doc.querySelector("style").textContent;

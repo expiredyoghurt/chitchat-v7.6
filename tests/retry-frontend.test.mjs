@@ -1,7 +1,7 @@
 // Drives the real rendered page in jsdom: result screen -> Try Again ->
 // copy previous -> edit -> resubmit -> improvement panel.
 import { JSDOM } from "jsdom";
-import { PAGE_HTML } from "../frontend.js";
+import { PAGE_HTML } from "../src/frontend.js";
 
 const calls = [];
 let submitResponsePayload = null;
