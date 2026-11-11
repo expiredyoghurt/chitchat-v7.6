@@ -94,9 +94,9 @@ All 20 test files pass at hand-off.
 
 The two supplied sheets (10 portrait cards, 10 landscape banners) were cropped and shipped as WebP.
 
-- **Files:** `login-art.js` (base64 pictures + their pixel sizes; generated) and a route in `index.js`
-  (`loginArtResponse`, `/login-art/v1/<portrait|landscape>-<0..9>.webp`, one-year immutable cache, no database).
-  `login-art.js` must be deployed next to `index.js`.
+- **Files:** `src/login-art.js` (base64 pictures + their pixel sizes; generated) and a route in `index.js`
+  (`loginArtResponse`, `/login-art/v<version>/<portrait|landscape>-<0..9>.webp`, one-year immutable cache, no
+  database). `src/login-art.js` must be deployed next to `src/index.js`.
 - **Page:** `loginArtIndex()` / `loginArtHtml()` in the `LOGINART_JS` block of `frontend.js`; a `<picture>`
   with an upright-orientation `<source>`. Sequence: random start, then +1 per page open and per logout,
   stored in `chitchat:loginart:v1`.
@@ -381,10 +381,10 @@ offline-marked attempts.
 
 | File | What it is |
 |---|---|
-| `index.js` | Worker: API, marking, skill helpers (`SKILL_AXES`, `skillsOfRounds`, `buildSkillWeb`, `buildSkillReport`, `computeSkillInsights`, `computePupilSkillMinis`, `scaleBreakdownToScore`) |
-| `frontend.js` | The whole UI as string arrays; the skill web lives in `SKILLWEB_JS` |
+| `src/index.js` | Worker: API, marking, skill helpers (`SKILL_AXES`, `skillsOfRounds`, `buildSkillWeb`, `buildSkillReport`, `computeSkillInsights`, `computePupilSkillMinis`, `scaleBreakdownToScore`) |
+| `src/frontend.js` | The whole UI as string arrays; the skill web lives in `SKILLWEB_JS` |
 | `tests/v710-*.test.mjs` | Skill web: server rules, UI, re-mark and override updates |
-| `login-art.js` | Generated: the 20 login pictures (base64 WebP) and their sizes |
+| `src/login-art.js` | Generated: the 20 login pictures (base64 WebP) and their sizes |
 | `tests/v801-login-art.test.mjs` | v8.0.1: picture route, login-page markup, random start and in-order sequence |
 | `tests/v80-*.test.mjs` | v8.0: mini shapes endpoint; tappable chart, words-first summary, hint, Skill Coach and quest, minis UI, contrast |
 | `README.md` | Release notes (v7.10 and v8.0 at the top) |

@@ -43,13 +43,18 @@ own servers doing it, not your computer.
    - `wrangler.toml`
    - `README.md`
    - the entire `src/` folder (containing `index.js`, `frontend.js`,
-     `seed-topics.js`, `vulgarity-list.js`) — most browsers let you drag a
+     `login-art.js`, `seed-topics.js`, `vulgarity-list.js`) — most browsers let you drag a
      whole folder onto GitHub's upload area and it preserves the folder
      structure automatically.
 3. Scroll down and click **"Commit changes"**. This is the browser
    equivalent of a `git push` — no command line involved.
 4. Confirm the file tree on your repo's main page shows `wrangler.toml`,
-   `README.md`, and a `src/` folder with the 4 files inside.
+   `README.md`, and a `src/` folder with the 5 files inside.
+   **Keep your own `wrangler.toml`** (the one with your real D1 and KV IDs);
+   the copy in this package only has `REPLACE_WITH_...` placeholders.
+   If `src/login-art.js` is missing, the build fails; if the whole `src/`
+   folder is not replaced, the site keeps running the old version (no login
+   pictures, no skill web).
 
 ### A3. Create the D1 database (this replaces `wrangler d1 create`)
 
@@ -206,10 +211,12 @@ this project needs.
 1. In the Cloudflare dashboard, go to **Workers & Pages → Create → Create
    Worker**. Give it a name (e.g. `just-a-chit-chat`) and create it.
 2. Open **"Edit code"** on the new Worker.
-3. In the file panel on the left of the editor, create 4 files matching this
-   project's `src/` folder:
+3. In the file panel on the left of the editor, create 5 files matching this
+   project's `src/` folder (**note:** `login-art.js` is about 1.3 MB, too
+   large to paste reliably in this editor — from v8.0.1 on, use Path A):
    - `index.js`
    - `frontend.js`
+   - `login-art.js`
    - `seed-topics.js`
    - `vulgarity-list.js`
 4. Open each one and paste in the matching file's contents from this
@@ -233,7 +240,7 @@ this project needs.
    `INSERT INTO config ...` statement from step A7 with your password).
 7. Click **Save and Deploy** in the editor.
 
-**Trade-off vs. Path A:** this works, but you're hand-copying 4 files with
+**Trade-off vs. Path A:** this works, but you're hand-copying 5 files with
 no version history and no auto-redeploy on future edits — every change
 means reopening the editor and re-pasting. Path A is the better choice if
 you expect to tweak the code again later (e.g. adding topics to

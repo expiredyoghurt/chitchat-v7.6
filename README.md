@@ -7,8 +7,8 @@ database) with Workers KV used only for session tokens.
 
 ## What's new in v8.0.2 — sharper login pictures
 
-**Deploy:** replace `login-art.js` (and `frontend.js`, `index.js`, which carry the new picture version
-number). Nothing else changes; no database step.
+**Deploy:** replace the whole `src/` folder (`src/login-art.js` has the new pictures; `src/frontend.js` and
+`src/index.js` carry the new picture version number). No database step. Keep your own `wrangler.toml`.
 
 - All 20 login pictures were **enlarged 2x with a neural upscaler (FSRCNN)** and **lightly sharpened**.
   Portrait cards are now 576x960 (were 288x480); landscape banners are 1236 px wide (were 824). Sign text,
@@ -21,8 +21,8 @@ number). Nothing else changes; no database step.
 
 ## What's new in v8.0.1 — login-page artwork
 
-**Deploy:** upload the new files **including the new `login-art.js`, which must sit next to `index.js`**
-(in `src/` if that is where `index.js` lives). No database step, no `wrangler.toml` change.
+**Deploy:** upload the whole `src/` folder **including the new `src/login-art.js`**, which must sit next to
+`src/index.js`. No database step. Keep your own `wrangler.toml` (with your real IDs).
 
 - The login page (and the teacher-password step) now opens with one of **10 pictures**, cropped from the two
   supplied sheets: **portrait cards** for phones and tablets held upright, **landscape banners** for
