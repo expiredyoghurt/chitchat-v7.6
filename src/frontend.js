@@ -2223,7 +2223,7 @@ var LOGINART_JS = [
 "// ---------- v8.0.1: login-page artwork ----------",
 "// 10 portrait cards (phones and tablets held upright) and 10 landscape banners (laptops, desktops,",
 "// phones on their side). Index n is the same animal in both sets where possible. The pictures are",
-"// served by the Worker from /login-art/v1/ and cached by the browser.",
+"// served by the Worker from /login-art/v<version>/ and cached by the browser.",
 "var LOGIN_ART_VERSION = 2;",
 "var LOGIN_ART_KEY = 'chitchat:loginart:v1';",
 "var LOGIN_ART_DIMS = {\"portrait\":[[576,960],[576,960],[576,960],[576,960],[576,960],[576,960],[576,960],[576,960],[576,960],[576,960]],\"landscape\":[[1236,336],[1236,336],[1236,264],[1236,264],[1236,230],[1236,238],[1236,238],[1236,248],[1236,230],[1236,248]]};",
